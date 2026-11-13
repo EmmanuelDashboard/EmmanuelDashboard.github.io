@@ -5,9 +5,12 @@ A web dashboard for diagonal thinning of pecan orchards from drone images. Drop 
 - the pecan canopy (no grass, soil or shadow);
 - every crown;
 - the planting grid;
-- the EVEN / ODD thinning diagonals;
+- the EVEN / ODD thinning diagonals (along every row the crowns alternate blue, red, blue, also across a missing tree);
 - the canopy total of each diagonal;
-- where thinning starts.
+- where thinning starts;
+- a thinning plan: trees and canopy removed and left, canopy cover before and after, tree heights, and the list of trees to remove with their GPS positions.
+
+Live site: <https://emmanueldashboard.github.io>
 
 You can correct crowns before you export the plan.
 
@@ -15,14 +18,20 @@ The site runs entirely in the web browser: the images you open are not uploaded 
 
 ## Two ways to use it
 
-| | Drop a drone image | Drop a results ZIP from the notebook |
+| | Drop a drone image (and its DSM) | Drop a results ZIP from the notebook |
 |---|---|---|
-| Input | Orthomosaic GeoTIFF (any projection, 8 or 16 bit), or a JPG / PNG of an orchard | `Pecan_Canopy_Results_….zip` from the Kaggle notebook |
-| Where it is analysed | In the browser, in about a minute | On Kaggle (Python), a few minutes per image |
-| Canopy | Colour and texture (RGB) | Colour and texture, plus tree height from the elevation (DSM) file: most accurate |
-| Then | The same map, totals, corrections and export | The same map, totals, corrections and export |
+| Input | Orthomosaic GeoTIFF (any projection, 8 or 16 bit), or a JPG / PNG of an orchard; plus, for a GeoTIFF, the elevation (DSM) file of the same flight | `Pecan_Canopy_Results_….zip` from the Kaggle notebook |
+| Where it is analysed | In the browser, in about a minute | On Kaggle (Python), a few minutes per image, at full resolution |
+| Canopy | Colour and texture; with the DSM also tree height (canopy at least 1 m tall), cast shadow trimmed | The same method, at full resolution: most detailed |
+| Then | The same map, totals, thinning plan, checks, corrections and export | The same map, totals, thinning plan, checks, corrections and export |
 
-A JPG or PNG has no coordinates, so you enter the ground size of one pixel (in cm). Areas are then in square metres, and exported shapes are in local metres instead of longitude / latitude.
+Drop the orthomosaic and its DSM together (hold <kbd>Ctrl</kbd> to select both), or add the DSM in the window that opens. Without a DSM the canopy comes from the image only and can include some grass. A JPG or PNG has no coordinates, so you enter the ground size of one pixel (in cm). Areas are then in square metres, and exported shapes are in local metres instead of longitude / latitude.
+
+## Decide
+
+- **Thinning plan.** Choose to remove the EVEN (blue) or the ODD (red) trees. The dashboard shows the trees and canopy removed and left, the field's canopy cover before and after, the mean tree height of both groups (with a DSM), the in-row spacing after thinning, and where to start.
+- **Trees to remove (CSV with GPS).** One row per tree to cut, ordered along each diagonal from its START end: crown ID, diagonal, row and tree number, canopy, height, longitude and latitude.
+- **Quality checks.** Row neighbours with the same colour (must be 0; *Show* goes to any that are left after corrections), whether the DSM was used, crowns crossed by their own line, crowns off the planting grid, and the cast shadow trimmed.
 
 ## What you see
 
@@ -47,6 +56,7 @@ Undo and redo with <kbd>Ctrl</kbd>+<kbd>Z</kbd> and <kbd>Ctrl</kbd>+<kbd>Y</kbd>
 
 ## Export
 
+- **Trees to remove (CSV with GPS)**, for the field crew.
 - **Canopy per diagonal (CSV):** one row per diagonal, then the EVEN, ODD and ALL totals at the end.
 - **Crowns table (CSV)** and **corrected crowns (GeoJSON, WGS84)**, for GIS software.
 - **Corrections log (CSV).**
@@ -71,14 +81,11 @@ The ZIP needs `crowns_wgs84.geojson` and `guides_wgs84.geojson`. The drone image
 
 ## Put the dashboard online (GitHub Pages, free)
 
-1. Sign in to GitHub and create a new **public** repository named `emmanuel-dashboard`. The repository name becomes the end of the site's link.
-2. On the new repository page, click **uploading an existing file**. Drag in everything from this folder: `index.html`, `README.md` and the folders `css`, `js`, `assets` and `notebook`. Click **Commit changes**.
-3. Open **Settings → Pages**. Under *Build and deployment*, choose **Deploy from a branch**, branch **main**, folder **/ (root)**, then **Save**.
-4. After a minute or two the site is live at `https://YOUR-USER-NAME.github.io/emmanuel-dashboard/`. Anyone with this link can use it with their own drone images or results ZIPs.
+This site is the repository `EmmanuelDashboard/EmmanuelDashboard.github.io`, published by GitHub Pages at <https://emmanueldashboard.github.io>. Anyone with the link can use it with their own drone images or results ZIPs.
 
-To update the site later, upload the changed files to the same repository; GitHub Pages republishes by itself.
+To update the site, upload the changed files to the same repository (**Add file → Upload files**, keep the folder names), then **Commit changes**; GitHub Pages republishes by itself within a minute or two.
 
-*Optional:* you can share a link that opens a results ZIP straight away. Upload the ZIP to the repository, for example as `data/field.zip`, and share `…/emmanuel-dashboard/?data=data/field.zip`. In a public repository, anyone can then download that ZIP, so only do this with data you are allowed to share.
+*Optional:* you can share a link that opens a results ZIP straight away. Upload the ZIP to the repository, for example as `data/field.zip`, and share `https://emmanueldashboard.github.io/?data=data/field.zip`. In a public repository, anyone can then download that ZIP, so only do this with data you are allowed to share.
 
 ## Files
 
@@ -87,7 +94,7 @@ To update the site later, upload the changed files to the same repository; GitHu
 | `index.html` | The page |
 | `css/app.css` | Layout and colours |
 | `js/app.js` | Map, totals, corrections, export, image reading |
-| `js/analyze.js` | Image analysis in the browser: canopy, crowns, planting grid, EVEN / ODD diagonals |
+| `js/analyze.js` | Image analysis in the browser: canopy (with the DSM: tree heights), crowns, planting grid, EVEN / ODD diagonals, row alternation |
 | `assets/` | Site icon |
 | `notebook/` | The pecan canopy notebook that makes the results ZIP |
 | `.nojekyll` | Tells GitHub Pages to serve the files as they are (optional) |
@@ -105,8 +112,8 @@ There is no build step.
 
 ## Method in short
 
-- **Pecan canopy only.** Grass, weeds, soil and shadow are excluded with a colour and texture classifier trained on the image itself. With a DSM, canopy must also stand at least 1 m above the ground.
-- **One crown per planting position.** The planting grid (20 × 40 ft design) is measured from the treetops.
-- **Diagonal thinning removes alternate trees in each row and column**, so every crown belongs to exactly one diagonal: EVEN or ODD.
+- **Pecan canopy only.** Grass, weeds, soil and shadow are excluded with a colour and texture classifier trained on the image itself. With a DSM, canopy must also stand at least 1 m above the ground, and clear cast shadow (dark, not leaf-green, at ground level) is trimmed from the crown edges.
+- **One crown per planting position.** The planting grid (20 × 40 ft design) is measured from the treetops; a crown is never cut into two pieces.
+- **Diagonal thinning removes alternate trees in each row and column**, so every crown belongs to exactly one diagonal: EVEN or ODD. Along every row neighbouring crowns always alternate, also across a missing tree (the crowns on one side of the gap move to the next diagonal, chosen so the diagonals stay as smooth as possible).
 - **Canopy areas** are in square metres, in the projected coordinates of the drone image.
 

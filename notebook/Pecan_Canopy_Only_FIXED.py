@@ -33,15 +33,19 @@
 #      tree (patch 90th pct >= 1 m; nothing > 0.5 m beyond height-
 #      confirmed canopy). RGB decides WHERE the crown edge is, because
 #      photogrammetric DSMs smear crown edges.
-#   6. Crowns are split by marker-controlled watershed: treetops from
+#   6. Clear cast shadow is trimmed from crown edges: dark AND not
+#      leaf-green AND at ground level (DSM). Shaded leaves stay canopy.
+#   7. Crowns are split by marker-controlled watershed: treetops from
 #      the canopy height model (or distance maxima if RGB only).
 #
 # EVEN / ODD DIAGONALS (measured from the trees, not fixed lines)
-#   7. The planting grid (in-row spacing, row spacing, row direction) is
+#   8. The planting grid (in-row spacing, row spacing, row direction) is
 #      measured from the treetops. Diagonal thinning removes "alternate
 #      trees in each row and column", a checkerboard on that grid, so each
 #      crown's diagonal comes from its grid position.
-#   8. Each diagonal is a smooth curve through the treetops on it, so it
+#   9. Along every row neighbouring crowns always alternate (1 blue,
+#      2 red, 3 blue ...), also across a missing tree.
+#  10. Each diagonal is a smooth curve through the treetops on it, so it
 #      crosses the top of every crown on it, also where rows bend.
 #
 # Raw detections are preserved separately. START + arrow follow D02.
@@ -58,9 +62,11 @@ import subprocess
 # the attached datasets. Elsewhere: the current folder.
 DATASET_DIR = Path("/kaggle/input") if Path("/kaggle/input").exists() else Path.cwd()
 
-# None = analyse EVERY orthomosaic found in DATASET_DIR (one results ZIP
-# each). Or one path, e.g. "/kaggle/input/my-field/ortho.tif", or a list.
-TIFF_PATH = None
+# The orthomosaic to analyse. A file name alone is searched for in
+# DATASET_DIR and all its sub-folders (here: the Hahira field, clipped to
+# the orchard). None = analyse EVERY orthomosaic found in DATASET_DIR (one
+# results ZIP each). Or a full path, or a list of names / paths.
+TIFF_PATH = "Pecan_Inside_Red_Boundary.tif"
 OUTPUT_ROOT = Path("/kaggle/working") if Path("/kaggle/working").exists() else Path.cwd() / "pecan_results"
 
 # ---------- Canopy-only detection (RGB) ----------
@@ -107,6 +113,22 @@ GROUND_CLEARANCE_M = 0.6
 TREETOP_SMOOTHING_M = 0.5
 TREETOP_SEPARATION_M = 2.5     # keep below half the in-row tree spacing
 
+# ---------- Cast shadow (trimmed from the crown edges) ----------
+# Shadow that the trees cast on the ground is dark, like the shaded side of
+# a crown, but it lies at ground level and is less green. Only clear
+# shadow is trimmed: a canopy pixel is removed when it is darker than
+# SHADOW_LUMA ("auto" = the field's 30th brightness percentile) AND at
+# ground level in the DSM (below SHADOW_MAX_HEIGHT_M) AND less green than
+# halfway between ground shadow and shaded leaves. Without a DSM: darker
+# than the field's typical ground shadow AND less green. Shaded leaves
+# (high and green) stay canopy. This changes canopy area by about 2 %.
+REMOVE_CAST_SHADOW = True
+SHADOW_LUMA = "auto"
+SHADOW_MAX_HEIGHT_M = 0.5
+SHADOW_SMOOTHING_M = 0.25
+# Gaps between leaves fully inside a crown, smaller than this, stay crown.
+SHADOW_HOLE_FILL_M2 = 1.0
+
 # ---------- Crown splitting ----------
 SEED_SEPARATION_M = 3.0
 SEED_HEIGHT_M = 0.35
@@ -135,6 +157,13 @@ MIN_BLOCK_TREES = 25
 # detected treetop becomes that position's crown, so touching crowns along
 # a row alternate EVEN / ODD (flag INFERRED_FROM_SPACING).
 SPLIT_COVERED_POSITIONS = True
+# True: along every row, crowns next to each other always have opposite
+# colours (1 blue, 2 red, 3 blue ...), also across a missing tree: the
+# crowns on one side of the gap move to the neighbouring diagonal (flag
+# MOVED_ACROSS_GAP; per row the side with fewer crowns moves). False: the
+# colour comes from the grid position only, so the two neighbours of a
+# missing tree share a colour.
+ALTERNATE_ALONG_ROWS = True
 
 # Combined EVEN + ODD limit (safety cap; reported if it binds).
 MAX_RETAINED_CROWNS = 100000
@@ -319,10 +348,28 @@ def find_images():
     every RGB GeoTIFF in DATASET_DIR and its sub-folders."""
     if TIFF_PATH is not None:
         given = TIFF_PATH if isinstance(TIFF_PATH, (list, tuple)) else [TIFF_PATH]
-        paths = [Path(path) for path in given]
-        for path in paths:
+        paths = []
+        for path in map(Path, given):
+            if not path.is_file() and path.name == str(path):  # name only
+                found = sorted(
+                    candidate for candidate in Path(DATASET_DIR).rglob(path.name)
+                    if candidate.is_file() and not is_output(candidate)
+                )
+                if found:
+                    path = found[0]
             if not path.is_file():
-                raise FileNotFoundError(path)
+                attached = sorted(
+                    candidate.name for candidate in Path(DATASET_DIR).rglob("*")
+                    if candidate.is_file()
+                    and candidate.suffix.lower() in (".tif", ".tiff")
+                    and not is_output(candidate)
+                )
+                raise FileNotFoundError(
+                    f"{path} not found in {DATASET_DIR}. GeoTIFFs attached: "
+                    + (", ".join(attached) or "none")
+                    + ". Set TIFF_PATH to one of them (or None for all)."
+                )
+            paths.append(path)
     else:
         paths = [
             path for path in sorted(Path(DATASET_DIR).rglob("*"))
@@ -1197,10 +1244,99 @@ def elevation_refine(src, rgb_mask, probability, valid, pixel_m):
     return mask, info, chm, removed
 
 
-def save_review_tiles(rgb, valid, mask, pixel_m, out, removed=None):
+def remove_cast_shadow(rgb, mask, valid, chm, pixel_m, dark_luma):
+    """Trim clear cast shadow (shadow on the ground) from the canopy.
+
+    Cast shadow and the shaded side of a crown are both dark. They differ in
+    height (shadow lies on the ground) and colour (shadow on soil or dry
+    grass is less green than shaded leaves). A dark canopy pixel is removed
+    only when it is BOTH at ground level in the DSM AND less green than
+    halfway between the field's ground shadow and its dark canopy. Without
+    a DSM it must be darker than the field's typical ground shadow and less
+    green. This is deliberately gentle: only thin shadow slivers at crown
+    edges go.
+
+    Returns (mask, removed, info).
+    """
+    sigma = SHADOW_SMOOTHING_M / pixel_m
+    red, green, blue = [rgb[..., i].astype("float32") for i in range(3)]
+    luma = gaussian(0.299 * red + 0.587 * green + 0.114 * blue, sigma)
+    exg = gaussian((2 * green - red - blue) / (red + green + blue + 1.0), sigma)
+    del red, green, blue
+
+    cut_luma = (
+        float(dark_luma) if str(SHADOW_LUMA).lower() == "auto"
+        else float(SHADOW_LUMA)
+    )
+    dark = luma < cut_luma
+
+    ground_shadow = valid & ~mask & dark
+    dark_canopy = mask & dark
+
+    enough = (
+        np.count_nonzero(ground_shadow) > 1000
+        and np.count_nonzero(dark_canopy) > 1000
+    )
+    cut_exg = (
+        0.5 * (
+            float(np.median(exg[ground_shadow])) + float(np.median(exg[dark_canopy]))
+        )
+        if enough else 0.12
+    )
+    shadow = dark_canopy & (exg < cut_exg)
+    del exg
+
+    very_dark = None
+
+    if chm is not None:
+        with np.errstate(invalid="ignore"):
+            shadow &= chm < SHADOW_MAX_HEIGHT_M  # unknown height (NaN): kept
+    else:
+        # RGB only: no height, so only pixels darker than the field's
+        # typical ground shadow count.
+        very_dark = (
+            float(np.median(luma[ground_shadow])) if enough else 0.6 * cut_luma
+        )
+        shadow &= luma < very_dark
+    del dark_canopy, dark, ground_shadow, luma
+
+    pixel_area = pixel_m * pixel_m
+    cleaned = cv2.morphologyEx(
+        (mask & ~shadow).astype("uint8"),
+        cv2.MORPH_OPEN,
+        disk(OPENING_RADIUS_M / pixel_m),
+    ).astype(bool)
+    holes = ndi.binary_fill_holes(cleaned) & ~cleaned  # small leaf gaps
+    holes &= ~drop_small(holes, int(SHADOW_HOLE_FILL_M2 / pixel_area))
+    cleaned |= holes & mask
+    del holes
+    cleaned = drop_small(cleaned, int(MIN_CANOPY_PATCH_M2 / pixel_area)) & valid
+    removed = mask & ~cleaned
+
+    info = {
+        "used": True,
+        "dark_luma_cut": cut_luma,
+        "very_dark_luma_cut_rgb_only": very_dark,
+        "greenness_cut_exg": cut_exg,
+        "max_height_m": SHADOW_MAX_HEIGHT_M if chm is not None else None,
+        "canopy_before_m2": float(mask.sum() * pixel_area),
+        "shadow_removed_m2": float(removed.sum() * pixel_area),
+        "canopy_after_m2": float(cleaned.sum() * pixel_area),
+        "rule": (
+            "dark AND less green than the cut AND at ground level in the DSM "
+            "(RGB only: darker than typical ground shadow); shaded leaves are "
+            "high and green and stay canopy"
+        ),
+    }
+
+    return cleaned, removed, info
+
+
+def save_review_tiles(rgb, valid, mask, pixel_m, out, removed=None, shadow=None):
     """Four zoomed tiles: RGB with the canopy outline (visual check).
 
     Orange = RGB canopy removed by the height check (when a DSM is used).
+    Purple = cast shadow taken out of the canopy.
     """
     height, width = mask.shape
     size = int(round(45.0 / pixel_m))
@@ -1230,6 +1366,12 @@ def save_review_tiles(rgb, valid, mask, pixel_m, out, removed=None):
                 0.45 * tile[gone] + 0.55 * np.array([255, 150, 0])
             ).astype("uint8")
 
+        if shadow is not None:
+            gone = shadow[row:row + size, col:col + size]
+            tile[gone] = (
+                0.45 * tile[gone] + 0.55 * np.array([200, 0, 255])
+            ).astype("uint8")
+
         outline = mask[row:row + size, col:col + size].astype("uint8")
         contours, _ = cv2.findContours(
             outline, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE
@@ -1244,10 +1386,14 @@ def save_review_tiles(rgb, valid, mask, pixel_m, out, removed=None):
         ax.axis("off")
 
     fig.suptitle(
-        "Pecan canopy (red outline)"
-        + ("; orange = removed by height check" if removed is not None else "")
-        + " — 45 m detail",
-        fontsize=15,
+        "Pecan canopy (red outline), 45 m detail\n"
+        + "; ".join(
+            text for text, show in (
+                ("orange = removed by height check", removed is not None),
+                ("purple = shadow removed", shadow is not None),
+            ) if show
+        ),
+        fontsize=14,
         weight="bold",
     )
 
@@ -1364,6 +1510,19 @@ def detect(src, valid_native, out):
     else:
         log("No elevation raster: RGB-only canopy and crown splitting.")
 
+    shadow_removed = None
+    shadow_info = {"used": False}
+
+    if REMOVE_CAST_SHADOW:
+        mask, shadow_removed, shadow_info = remove_cast_shadow(
+            rgb, mask, valid, chm, pixel_m, thresholds["dark_luma_p30"]
+        )
+        log(
+            f"Cast shadow trimmed from the crown edges: "
+            f"{shadow_info['shadow_removed_m2']:,.0f} m2 (dark AND not "
+            f"leaf-green AND at ground level)."
+        )
+
     canopy_m2 = float(mask.sum() * pixel_area)
 
     log(f"Pecan canopy (final): {canopy_m2:,.1f} m2")
@@ -1374,8 +1533,10 @@ def detect(src, valid_native, out):
         src, "uint8", 255,
     )
 
-    review = save_review_tiles(rgb, valid, mask, pixel_m, out, removed)
-    del removed
+    review = save_review_tiles(
+        rgb, valid, mask, pixel_m, out, removed, shadow_removed
+    )
+    del removed, shadow_removed
 
     if DISPLAY_MAPS and review is not None:
         show_file(review)
@@ -1534,6 +1695,7 @@ def detect(src, valid_native, out):
         "classifier_iterations": int(classifier.n_iter_),
         "pixels_classified": predicted_pixels,
         "elevation": elevation_info,
+        "cast_shadow": shadow_info,
         "crown_markers": (
             f"canopy-height treetops (smoothing {TREETOP_SMOOTHING_M} m, "
             f"min spacing {TREETOP_SEPARATION_M} m)"
@@ -2012,10 +2174,33 @@ def wavy_diagonal(
     return np.concatenate(u_parts), np.concatenate(v_parts)
 
 
+def choose_diagonal(transform, basis):
+    """The diagonal direction closest to DIAGONAL_DIRECTION_HINT_DEG.
+
+    Returns (vector of one diagonal step, grid step (1, +-1), other vector).
+    """
+    linear = np.array([[transform.a, transform.b], [transform.d, transform.e]])
+
+    def angle_gap(vector):
+        col, row = np.linalg.solve(linear, vector)
+        gap = abs(math.degrees(math.atan2(row, col)) % 180 - DIAGONAL_DIRECTION_HINT_DEG) % 180
+        return min(gap, 180 - gap)
+
+    a, b = basis[:, 0], basis[:, 1]
+    options = [(a + b, (1, 1)), (a - b, (1, -1))]
+    options.sort(key=lambda option: angle_gap(option[0]))
+    (vector, step), (other, _) = options
+
+    return vector, step, other
+
+
 def diagonal_guides(
     src, field, points, scores, block, positions, basis, use, outlines,
-    knot_points=None,
+    knot_points=None, number_positions=None,
 ):
+    """`positions` decide each crown's diagonal; `number_positions` (the
+    planting grid before alternate_along_rows) fix the numbering, so D01 and
+    D02 stay at the same corner."""
     transform = src.transform
     linear = np.array([[transform.a, transform.b], [transform.d, transform.e]])
 
@@ -2026,14 +2211,8 @@ def diagonal_guides(
     def bearing(vector):
         return math.degrees(math.atan2(vector[0], vector[1])) % 180
 
-    def angle_gap(angle):
-        gap = abs(angle - DIAGONAL_DIRECTION_HINT_DEG) % 180
-        return min(gap, 180 - gap)
-
     a, b = basis[:, 0], basis[:, 1]
-    options = [(a + b, (1, 1)), (a - b, (1, -1))]
-    options.sort(key=lambda option: angle_gap(image_angle(option[0])))
-    (vector, step), (other, _) = options
+    vector, step, other = choose_diagonal(transform, basis)
 
     step_m = float(np.hypot(*vector))
     pitch = abs(float(np.linalg.det(basis))) / step_m
@@ -2049,26 +2228,38 @@ def diagonal_guides(
         positions[:, 0] * step[1] - positions[:, 1] * step[0],
         UNPLACED,
     )
+    base_positions = positions if number_positions is None else number_positions
+    base_index = np.where(
+        block >= 0,
+        base_positions[:, 0] * step[1] - base_positions[:, 1] * step[0],
+        UNPLACED,
+    )
     along = points @ direction
     offset = points @ normal
     guides = []
 
     for part in range(int(block.max()) + 1):
         keys = np.unique(index[block == part])
+        base_keys = np.unique(base_index[block == part])
         trend = (
             np.polyfit(
-                keys,
-                [offset[(block == part) & (index == k)].mean() for k in keys],
+                base_keys,
+                [
+                    offset[(block == part) & (base_index == k)].mean()
+                    for k in base_keys
+                ],
                 1,
             )[0]
-            if len(keys) >= 2 else 1.0
+            if len(base_keys) >= 2 else 1.0
         )
         sign = 1 if trend > 0 else -1
-        first = keys.max() if sign > 0 else keys.min()
+        first = base_keys.max() if sign > 0 else base_keys.min()
         numbered = len(guides)
+        low_key = int(min(keys.min(), base_keys.min()))
+        high_key = int(max(keys.max(), base_keys.max()))
 
         # D01 = outermost diagonal on the side the normal points to (as before).
-        for k in range(int(keys.min()), int(keys.max()) + 1):
+        for k in range(low_key, high_key + 1):
             number = numbered + int((first - k) * sign) + 1
             members = np.flatnonzero((block == part) & (index == k))
             knots = {}
@@ -2254,8 +2445,9 @@ def diagonal_guides(
             "each crown's diagonal comes from its grid position; each "
             "diagonal is one connected S-wave from its first to its last "
             "crown through every crown on it (cut where it leaves the "
-            "field); one crown per planting position (20 ft spacing), so "
-            "touching crowns along a row alternate EVEN / ODD."
+            "field); one crown per planting position (20 ft spacing); "
+            "neighbouring crowns along a row alternate EVEN / ODD, also "
+            "across a missing tree (ALTERNATE_ALONG_ROWS)."
         ),
         "in_row_spacing_m": float(math.hypot(*a)),
         "row_spacing_m": float(abs(np.linalg.det(basis)) / math.hypot(*a)),
@@ -2390,8 +2582,15 @@ def fill_positions(
         to_spot = (cols - sc) ** 2 + (rows - sr) ** 2
         take = np.zeros(window.shape, dtype=bool)
 
+        # Each neighbour keeps the canopy closer to its own position: its
+        # planting position if it was placed there by covering it (its
+        # treetop may be far away), otherwise its treetop.
+        reference = {
+            t: crossing_points.get(t, points[t]) for t in neighbours
+        }
+
         for t in neighbours:
-            tc, tr = inverse * tuple(points[t])
+            tc, tr = inverse * tuple(reference[t])
             take |= (window == label_ids[t]) & (to_spot < (cols - tc) ** 2 + (rows - tr) ** 2)
 
         pieces_found, _ = ndi.label(take)
@@ -2401,7 +2600,30 @@ def fill_positions(
             continue
 
         window[take] = next_label
-        new.append((site, spot, next_label, (r0, r1, c0, c1), (sr, sc)))
+
+        # A neighbour must stay in one piece: canopy of it cut off on the far
+        # side of the new crown joins the new crown (never red-blue-red for
+        # one tree along the row).
+        R0, R1 = max(0, int(sr) - 2 * radius), min(labels.shape[0], int(sr) + 2 * radius + 1)
+        C0, C1 = max(0, int(sc) - 2 * radius), min(labels.shape[1], int(sc) + 2 * radius + 1)
+        wide = labels[R0:R1, C0:C1]  # view
+        grown = cv2.dilate((wide == next_label).astype("uint8"), disk(1)).astype(bool)
+
+        for t in neighbours:
+            pieces_left, count = ndi.label(wide == label_ids[t])
+            if count < 2:
+                continue
+            ref_c, ref_r = inverse * tuple(reference[t])
+            ref_r, ref_c = int(ref_r) - R0, int(ref_c) - C0
+            inside = 0 <= ref_r < wide.shape[0] and 0 <= ref_c < wide.shape[1]
+            main = pieces_left[ref_r, ref_c] if inside else 0
+            if not main:
+                main = int(np.argmax(np.bincount(pieces_left.ravel())[1:])) + 1
+            for piece in range(1, count + 1):
+                if piece != main and (grown & (pieces_left == piece)).any():
+                    wide[pieces_left == piece] = next_label
+
+        new.append((site, spot, next_label, (R0, R1, C0, C1), (sr, sc)))
         changed.update(neighbours)
         site_crowns[site] = [-1]
         next_label += 1
@@ -2448,6 +2670,128 @@ def fill_positions(
         label_ids, points, seeds, block, positions, fit, eligible, outlines,
         inferred, snapped, crossing_points,
     )
+
+
+def alternate_along_rows(block, positions, use, step):
+    """Crowns next to each other in a row always get opposite colours.
+
+    On the grid the colour comes from the planting position, so where a
+    position in a row has no crown (missing tree, or only shadow) the two
+    crowns on either side of it share a colour. Each row is cut into runs of
+    crowns on consecutive positions. Across a gap that would give the same
+    colour, one of the two runs moves one position toward the gap: it then
+    takes the neighbouring diagonal and the other colour. Runs only move
+    into a gap, never past their neighbours or beyond the ends of the row.
+
+    Each row has two ways to do this (move one set of runs or the other).
+    Where a moved run in one row lines up with a moved run in the next row,
+    the diagonals between them stay smooth; elsewhere they make an extra
+    one-tree step. The choice for all rows together that gives the fewest
+    extra steps (then the fewest moved crowns) is found exactly by dynamic
+    programming over the rows of each planting block.
+
+    Returns (positions used for the diagonals, moved flag per crown,
+    number of extra steps in the diagonals).
+    """
+    shifted = positions.copy()
+    moved = np.zeros(len(positions), dtype=bool)
+    extra_steps = 0
+    rows = {}
+
+    for t in np.flatnonzero(use & (block >= 0)):
+        rows.setdefault((int(block[t]), int(positions[t, 1])), []).append(t)
+
+    def row_options(members, row):
+        """The ways to make this row alternate: [(shift per crown, diagonal
+        index -> shift, crowns moved)]."""
+        members = np.array(sorted(members, key=lambda t: positions[t, 0]))
+        runs = np.split(
+            members, np.flatnonzero(np.diff(positions[members, 0]) > 1) + 1
+        )
+        gaps = [
+            int(positions[runs[r + 1][0], 0] - positions[runs[r][-1], 0])
+            for r in range(len(runs) - 1)
+        ]
+        # An even step (odd number of empty positions) keeps the colour:
+        # the run after it must take the other colour.
+        flip = [0]
+        for gap in gaps:
+            flip.append(flip[-1] ^ int(gap % 2 == 0))
+        flip = np.array(flip)
+        patterns = [flip] if len(runs) < 2 else [flip, 1 - flip]
+        options = []
+
+        for pattern in patterns:
+            shift = {}
+            for r, run in enumerate(runs):
+                if not pattern[r]:
+                    s = 0
+                else:
+                    into_left = r > 0 and not pattern[r - 1] and gaps[r - 1] % 2 == 0
+                    into_right = (
+                        r < len(runs) - 1 and not pattern[r + 1] and gaps[r] % 2 == 0
+                    )
+                    s = -1 if into_left else 1 if into_right else (-1 if r > 0 else 1)
+                for t in run:
+                    shift[int(t)] = s
+            diagonal = {
+                int((positions[t, 0] + s) * step[1] - row * step[0]): s
+                for t, s in shift.items()
+            }
+            options.append((shift, diagonal, sum(1 for s in shift.values() if s)))
+
+        return options
+
+    for part in sorted({part for part, _ in rows}):
+        row_ids = sorted(row for p, row in rows if p == part)
+        choices = [row_options(rows[(part, row)], row) for row in row_ids]
+
+        def steps_between(earlier, later):
+            return sum(
+                1 for k, s in later[1].items()
+                if k in earlier[1] and earlier[1][k] != s
+            )
+
+        # Viterbi: cost = extra diagonal steps + 0.01 per moved crown.
+        cost = [[0.01 * option[2] for option in choices[0]]]
+        back = [[0] * len(choices[0])]
+
+        for n in range(1, len(row_ids)):
+            adjacent = row_ids[n] - row_ids[n - 1] == 1
+            here, previous = [], []
+            for option in choices[n]:
+                best = min(
+                    range(len(choices[n - 1])),
+                    key=lambda p: cost[n - 1][p] + (
+                        steps_between(choices[n - 1][p], option) if adjacent else 0
+                    ),
+                )
+                here.append(
+                    cost[n - 1][best] + 0.01 * option[2]
+                    + (steps_between(choices[n - 1][best], option) if adjacent else 0)
+                )
+                previous.append(best)
+            cost.append(here)
+            back.append(previous)
+
+        pick = int(np.argmin(cost[-1]))
+        picked = [0] * len(row_ids)
+        for n in range(len(row_ids) - 1, -1, -1):
+            picked[n] = pick
+            pick = back[n][pick]
+
+        for n, row in enumerate(row_ids):
+            shift = choices[n][picked[n]][0]
+            for t, s in shift.items():
+                if s:
+                    shifted[t, 0] += s
+                    moved[t] = True
+            if n and row_ids[n] - row_ids[n - 1] == 1:
+                extra_steps += steps_between(
+                    choices[n - 1][picked[n - 1]], choices[n][picked[n]]
+                )
+
+    return shifted, moved, extra_steps
 
 
 def planting_diagonals(src, field, crowns, tops, labels):
@@ -2544,11 +2888,68 @@ def planting_diagonals(src, field, crowns, tops, labels):
             kept[t] = False
             pieces_joined += 1
 
+    # Along every row, neighbouring crowns alternate EVEN / ODD, also across
+    # a missing tree (the crowns on one side move to the next diagonal).
+    if ALTERNATE_ALONG_ROWS:
+        diagonal_positions, moved, extra_steps = alternate_along_rows(
+            block, positions, kept, choose_diagonal(src.transform, basis)[1]
+        )
+        for t, keep in merged_into.items():  # pieces follow their tree
+            if block[t] >= 0 and block[keep] >= 0:
+                diagonal_positions[t] = diagonal_positions[keep]
+    else:
+        diagonal_positions, moved = positions, np.zeros(len(points), dtype=bool)
+        extra_steps = 0
+
     guides, assigned, along, settings, index = diagonal_guides(
-        src, field, points, seeds[:, 2], block, positions, basis, kept, outlines,
-        knot_points,
+        src, field, points, seeds[:, 2], block, diagonal_positions, basis, kept,
+        outlines, knot_points, number_positions=positions,
     )
+    # A crown off the planting grid (no row position) takes the colour
+    # opposite to the crowns next to it along the row (nearest crown on each
+    # side within 1.5 tree spacings), on the nearest line of that colour.
+    off_grid_recoloured = 0
+
+    if ALTERNATE_ALONG_ROWS:
+        row_hat = basis[:, 0] / math.hypot(*basis[:, 0])
+        across_hat = np.array([-row_hat[1], row_hat[0]])
+        row_spacing = abs(float(np.linalg.det(basis))) / math.hypot(*basis[:, 0])
+        where = knot_points
+        on_u, on_v = where @ row_hat, where @ across_hat
+        placed = np.flatnonzero(kept)
+        placed_tree = cKDTree(where[placed])
+        drawn_guides = [g for g in guides if not g["geometry"].is_empty]
+
+        for t in np.flatnonzero(kept & (block < 0)):
+            sides = {}
+            for k in placed_tree.query_ball_point(where[t], 1.5 * in_row):
+                s = placed[k]
+                du, dv = on_u[s] - on_u[t], on_v[s] - on_v[t]
+                if s == t or abs(dv) >= 0.4 * row_spacing or du == 0:
+                    continue
+                side = du > 0
+                if side not in sides or abs(du) < abs(on_u[sides[side]] - on_u[t]):
+                    sides[side] = s
+            colours = {assigned[s][1] for s in sides.values()}
+            if len(colours) != 1 or assigned[t][1] not in colours:
+                continue
+            wanted = "EVEN" if assigned[t][1] == "ODD" else "ODD"
+            options = [g for g in drawn_guides if g["family"] == wanted]
+            if not options:
+                continue
+            point = Point(points[t])
+            guide = min(options, key=lambda g: g["geometry"].distance(point))
+            assigned[t] = (
+                guide["diagonal"], guide["family"],
+                guide["geometry"].distance(point),
+            )
+            off_grid_recoloured += 1
+
     settings.update(grid_info)
+    settings["off_grid_crowns_recoloured_to_alternate"] = off_grid_recoloured
+    settings["alternate_along_rows"] = bool(ALTERNATE_ALONG_ROWS)
+    settings["crowns_moved_across_gap"] = int((moved & kept).sum())
+    settings["diagonal_extra_steps_from_moves"] = int(extra_steps)
     settings["nearest_treetop_spacing_m"] = nearest
     settings["split_crowns_merged"] = split_merged
     settings["off_grid_pieces_joined_to_their_tree"] = pieces_joined
@@ -2556,21 +2957,49 @@ def planting_diagonals(src, field, crowns, tops, labels):
     settings["off_grid_crowns_snapped_to_position"] = int(snapped)
     step = settings["diagonal_grid_step"]
 
-    # Check (the planting rule): touching crowns next to each other in a row
-    # must have opposite colours.
+    # Check (the planting rule): crowns next to each other in a row (no other
+    # crown between them, touching or not) must have opposite colours.
     family_of = np.array([entry[1] for entry in assigned])
     rows_of = {}
     for t in np.flatnonzero(kept & (block >= 0)):
         rows_of.setdefault((int(block[t]), int(positions[t, 1])), []).append(t)
-    touching_pairs = same_colour = 0
+    row_pairs = same_colour = touching_pairs = touching_same = 0
     for members in rows_of.values():
         members.sort(key=lambda t: positions[t, 0])
         for t, s in zip(members, members[1:]):
+            same = bool(family_of[t] == family_of[s])
+            row_pairs += 1
+            same_colour += same
             if outlines[t].distance(outlines[s]) < 0.3:
                 touching_pairs += 1
-                same_colour += family_of[t] == family_of[s]
+                touching_same += same
+    settings["row_neighbours"] = row_pairs
+    settings["row_neighbours_same_colour"] = int(same_colour)
+
+    # The same check as the eye sees it on the map, for every crown (on the
+    # grid or not): crowns grouped into rows by position across the rows,
+    # neighbours along the row within 1.5 tree spacings.
+    map_row_hat = basis[:, 0] / math.hypot(*basis[:, 0])
+    map_across = np.array([-map_row_hat[1], map_row_hat[0]])
+    map_spacing = abs(float(np.linalg.det(basis))) / math.hypot(*basis[:, 0])
+    shown_crowns = np.flatnonzero(kept)
+    map_u = knot_points[shown_crowns] @ map_row_hat
+    map_v = knot_points[shown_crowns] @ map_across
+    order = np.argsort(map_v, kind="stable")
+    map_rows = np.zeros(len(shown_crowns), dtype=int)
+    map_rows[order] = np.cumsum(np.r_[0, np.diff(map_v[order]) > 0.4 * map_spacing])
+    map_pairs = map_same = 0
+    for r in np.unique(map_rows):
+        members = np.flatnonzero(map_rows == r)
+        members = members[np.argsort(map_u[members], kind="stable")]
+        for a_, b_ in zip(members, members[1:]):
+            if map_u[b_] - map_u[a_] <= 1.5 * in_row:
+                map_pairs += 1
+                map_same += family_of[shown_crowns[a_]] == family_of[shown_crowns[b_]]
+    settings["map_row_neighbours"] = int(map_pairs)
+    settings["map_row_neighbours_same_colour"] = int(map_same)
     settings["touching_row_neighbours"] = touching_pairs
-    settings["touching_row_neighbours_same_colour"] = int(same_colour)
+    settings["touching_row_neighbours_same_colour"] = int(touching_same)
 
     # Checks: each crown is crossed by its own line; does another line reach
     # into it (passing along the edge between two crowns is not counted)?
@@ -2688,6 +3117,8 @@ def planting_diagonals(src, field, crowns, tops, labels):
             crown_flags.append("MERGED_SPLIT_CROWN")
         if inferred[t]:
             crown_flags.append("INFERRED_FROM_SPACING")
+        if moved[t]:
+            crown_flags.append("MOVED_ACROSS_GAP")
         if kept[t] and not crossed[t]:
             crown_flags.append("LINE_MISSES_CROWN")
         flags.append(";".join(crown_flags))
@@ -2738,8 +3169,13 @@ def planting_diagonals(src, field, crowns, tops, labels):
     )
     log(
         f"Planting rule: {int(inferred.sum())} positions got their crown from "
-        f"the 20 ft spacing; touching neighbours in a row with the same "
-        f"colour: {same_colour} of {touching_pairs}."
+        f"the 20 ft spacing; {settings['crowns_moved_across_gap']} crowns moved "
+        f"to the next diagonal across a gap ({extra_steps} extra steps in the "
+        f"diagonals); neighbours in a row with the same colour: "
+        f"{same_colour} of {row_pairs} (on the map, all crowns: "
+        f"{settings['map_row_neighbours_same_colour']} of "
+        f"{settings['map_row_neighbours']}); "
+        f"{off_grid_recoloured} off-grid crowns recoloured to alternate."
     )
 
     return guides, table, settings, pd.DataFrame(empty_rows), merged, updated_crowns
@@ -4054,6 +4490,47 @@ def run(tif):
         with rasterio.open(out / "candidate_labels.tif", "w", **profile) as destination:
             destination.write(labels, 1)
 
+        # Tree height (DSM) of every final crown: also the crowns made for
+        # planting positions from the spacing, with split-tree pieces joined
+        # to their tree. Replaces the first crown_heights.csv.
+        chm_path = out / "canopy_height_model_cm.tif"
+
+        if chm_path.is_file():
+            with rasterio.open(chm_path) as height_src:
+                raw_height = height_src.read(1)
+            chm = np.where(
+                raw_height == -32768, np.nan, raw_height / 100.0
+            ).astype("float32")
+            del raw_height
+
+            remap = np.arange(
+                int(max([labels.max(), *merged.keys(), *merged.values()])) + 1,
+                dtype="int32",
+            )
+            for source, target in merged.items():
+                remap[source] = target
+            final_labels = remap[labels]
+            count = int(final_labels.max())
+
+            stats = label_percentiles(final_labels, count, chm, [50, 90, 99])
+            finite = np.isfinite(chm)
+            sums = np.bincount(
+                final_labels[finite], weights=chm[finite], minlength=count + 1
+            )
+            counts = np.bincount(final_labels[finite], minlength=count + 1)
+            present = np.flatnonzero(np.bincount(final_labels.ravel(), minlength=count + 1))
+            present = present[present > 0]
+
+            pd.DataFrame({
+                "label_id": present,
+                "height_median_m": stats[50][present],
+                "height_p90_m": stats[90][present],
+                "height_top_m": stats[99][present],
+                "height_mean_m": sums[present] / np.maximum(counts[present], 1),
+            }).to_csv(out / "crown_heights.csv", index=False)
+
+            del chm, finite, final_labels, remap, stats, sums, counts
+
         del labels
 
         # One planting position = one crown: merge the pieces of split trees.
@@ -4439,6 +4916,9 @@ def run(tif):
         "RGB ground pixels). Patches below 1 m and anything more than\n"
         "0.5 m beyond height-confirmed canopy are removed; crown edges\n"
         "come from RGB. Crowns are split at canopy-height treetops.\n"
+        "Clear cast shadow is trimmed from the crown edges: a pixel goes\n"
+        "only when it is dark AND less green than leaves AND at ground\n"
+        "level in the DSM (below 0.5 m); shaded leaves stay canopy.\n"
         "canopy_mask.tif: 1 = pecan canopy, 0 = not canopy, 255 = outside.\n"
         "canopy_height_model_cm.tif: height above ground in centimetres.\n"
         "crown_heights.csv: median / p90 / top / mean height per crown.\n"
@@ -4446,7 +4926,7 @@ def run(tif):
         "canopy_training_pixels.tif: 1 canopy, 2 ground vegetation,\n"
         "  3 soil/road, 4 shadow, 0 unlabelled (automatic labels).\n"
         "canopy_review_tiles.png: zoomed visual check (orange = removed\n"
-        "  by the height check).\n"
+        "  by the height check, purple = shadow removed).\n"
         "canopy_probability_sensitivity.csv: RGB area vs boundary threshold.\n"
         "\n"
         "EVEN / ODD DIAGONALS\n"
@@ -4470,8 +4950,12 @@ def run(tif):
         "One crown per planting position: canopy that covers a position with\n"
         "no detected treetop becomes that position's crown (flag\n"
         "INFERRED_FROM_SPACING), so touching crowns in a row alternate.\n"
-        "Along each planted row the crowns alternate EVEN / ODD every 20 ft\n"
-        "(a missing tree counts as a position). Two crowns on one planting\n"
+        "Along each planted row neighbouring crowns always alternate\n"
+        "EVEN / ODD (1 blue, 2 red, 3 blue ...), also across a missing\n"
+        "tree: the crowns on one side of the gap (the side with fewer\n"
+        "crowns) move to the neighbouring diagonal (flag MOVED_ACROSS_GAP).\n"
+        "Check in summary.json: row_neighbours_same_colour (0 = no two\n"
+        "neighbours in a row with the same colour). Two crowns on one planting\n"
         "position (one tree split in two) are merged into one crown; an\n"
         "off-grid crown piece touching a tree within one tree spacing joins\n"
         "that tree.\n"

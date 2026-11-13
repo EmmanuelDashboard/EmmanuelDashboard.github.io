@@ -1,15 +1,23 @@
 /*
  * Emmanuel Dashboard for Pecan Thinning: image analysis in the browser.
  *
- * Same method as the pecan canopy notebook, RGB only:
+ * Same method as the pecan canopy notebook:
  *   1. colour + multi-scale texture features;
  *   2. training pixels harvested from the image itself (canopy, ground
  *      vegetation, soil / road, shadow) and a classifier for P(canopy);
- *   3. crowns split by a marker-controlled watershed (crown centres);
- *   4. planting grid measured from the crown centres; grid position of every
- *      crown; one crown per planting position;
- *   5. EVEN / ODD diagonals as wavy lines through the crowns.
- * Input: RGBA pixels on a square grid of `pixel` metres (north up).
+ *   3. with an elevation file (DSM): canopy height = DSM - terrain; only
+ *      canopy at least 1 m tall is a tree (grass and weeds go), crown edges
+ *      from the image;
+ *   4. clear cast shadow trimmed from the crown edges (gentle);
+ *   5. crowns split by a marker-controlled watershed (treetops from the DSM,
+ *      or crown centres with the image only);
+ *   6. planting grid measured from the treetops; grid position of every
+ *      crown; one crown per planting position (a crown is never cut in two);
+ *   7. EVEN / ODD diagonals as wavy lines through the crowns; along every row
+ *      neighbouring crowns always alternate (1 blue, 2 red ...), also across
+ *      a missing tree.
+ * Input: RGBA pixels on a square grid of `pixel` metres (north up), and
+ * optionally `surface`: DSM elevation on the same grid (NaN = no data).
  */
 (() => {
   "use strict";
@@ -780,6 +788,254 @@
     return { pos, placed, fitM };
   }
 
+  // ------------------------------------------------------------------ elevation (DSM)
+  // Ground elevation under the trees: the DSM median (1 m cells) on pixels
+  // the RGB classifier calls ground, filled in under the crowns by
+  // multi-scale normalized convolution (same as the notebook).
+  function terrainModel(surface, ground, w, h, pixel) {
+    const step = Math.max(1, Math.round(1.0 / pixel));
+    const W = Math.ceil(w / step), H = Math.ceil(h / step);
+    const level = new Float32Array(W * H), usable = new Float32Array(W * H);
+    const buf = [];
+    const levels = [];
+    for (let cy = 0; cy < H; cy++) for (let cx = 0; cx < W; cx++) {
+      buf.length = 0;
+      for (let y = cy * step; y < Math.min(h, (cy + 1) * step); y++) {
+        for (let x = cx * step; x < Math.min(w, (cx + 1) * step); x++) {
+          const i = y * w + x;
+          if (ground[i]) buf.push(surface[i]);
+        }
+      }
+      if (buf.length >= 0.25 * step * step) {
+        buf.sort((p, q) => p - q);
+        level[cy * W + cx] = buf[buf.length >> 1];
+        usable[cy * W + cx] = 1;
+        levels.push(level[cy * W + cx]);
+      }
+    }
+    if (levels.length < 10) return null;
+    const fallback = percentile(levels, 50);
+    const terrain = new Float32Array(W * H).fill(NaN);
+    const weighted = new Float32Array(W * H);
+    for (let i = 0; i < W * H; i++) weighted[i] = level[i] * usable[i];
+    for (const sigmaM of [1.5, 3, 6, 12, 24, 48]) {
+      const s = sigmaM / (step * pixel);
+      const support = gauss(usable, W, H, s), estimate = gauss(weighted, W, H, s);
+      for (let i = 0; i < W * H; i++) if (Number.isNaN(terrain[i]) && support[i] > 0.15) terrain[i] = estimate[i] / Math.max(support[i], 1e-6);
+    }
+    for (let i = 0; i < W * H; i++) if (Number.isNaN(terrain[i])) terrain[i] = fallback;
+    const smooth = gauss(terrain, W, H, 1.0 / (step * pixel));
+    const out = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const fy = Math.min(H - 1, Math.max(0, (y + 0.5) / step - 0.5)), y0 = Math.floor(fy), y1 = Math.min(H - 1, y0 + 1), ty = fy - y0;
+      for (let x = 0; x < w; x++) {
+        const fx = Math.min(W - 1, Math.max(0, (x + 0.5) / step - 0.5)), x0 = Math.floor(fx), x1 = Math.min(W - 1, x0 + 1), tx = fx - x0;
+        out[y * w + x] = (1 - ty) * ((1 - tx) * smooth[y0 * W + x0] + tx * smooth[y0 * W + x1]) + ty * ((1 - tx) * smooth[y1 * W + x0] + tx * smooth[y1 * W + x1]);
+      }
+    }
+    return out;
+  }
+
+  // The DSM decides WHAT is a tree (canopy at least 1 m tall), the RGB image
+  // decides WHERE the crown edge is (a DSM smears crown edges).
+  function elevationRefine(surface, mask, P, valid, w, h, pixel) {
+    const n = w * h, area = pixel * pixel;
+    const known = new Uint8Array(n);
+    let knownCount = 0, validCount = 0;
+    for (let i = 0; i < n; i++) {
+      if (valid[i]) validCount++;
+      if (valid[i] && Number.isFinite(surface[i])) { known[i] = 1; knownCount++; }
+    }
+    const coverage = knownCount / Math.max(validCount, 1);
+    if (coverage < 0.5) return { mask, chm: null, info: { used: false, reason: `the elevation file covers only ${Math.round(100 * coverage)}% of the field` } };
+
+    const low = percentile(sample(surface, 7, (i) => known[i]), 5);
+    const isHeight = low >= -1 && low <= 1;
+    let chm;
+    if (isHeight) {
+      chm = Float32Array.from(surface);
+    } else {
+      const clearance = edt(not(mask), w, h);
+      const ground = new Uint8Array(n);
+      for (let i = 0; i < n; i++) ground[i] = known[i] && P[i] < 0.2 && clearance[i] * pixel >= 0.6 ? 1 : 0;
+      const terrain = terrainModel(surface, ground, w, h, pixel);
+      if (!terrain) return { mask, chm: null, info: { used: false, reason: "too few ground pixels to model the terrain" } };
+      chm = new Float32Array(n);
+      for (let i = 0; i < n; i++) chm[i] = surface[i] - terrain[i];
+    }
+    for (let i = 0; i < n; i++) if (!known[i]) chm[i] = NaN;
+
+    const under = sample(chm, 3, (i) => mask[i] && Number.isFinite(chm[i]));
+    if (under.length && percentile(under, 90) < 1.0) {
+      return { mask, chm: null, info: { used: false, reason: "no tree heights under the canopy (terrain-only file, or not the same field)" } };
+    }
+
+    const before = mask.reduce((s, v) => s + v, 0);
+    const confirmed = new Uint8Array(n);
+    for (let i = 0; i < n; i++) confirmed[i] = mask[i] && chm[i] >= 1.0 ? 1 : 0;
+    const near = dilate(confirmed, w, h, 0.5 / pixel);
+    let out = new Uint8Array(n);
+    for (let i = 0; i < n; i++) out[i] = mask[i] && (near[i] || !known[i]) ? 1 : 0;
+    out = fillSmallHoles(out, w, h, Math.round(4.0 / area));
+    out = opening(out, w, h, 0.2 / pixel);
+
+    // Every canopy patch must be a tree: its 90th-percentile height >= 1 m.
+    const { labels, count } = label(out, w, h);
+    const values = Array.from({ length: count + 1 }, () => []);
+    for (let i = 0; i < n; i++) if (labels[i] && Number.isFinite(chm[i])) values[labels[i]].push(chm[i]);
+    const keep = new Uint8Array(count + 1);
+    let lowPatches = 0;
+    for (let l = 1; l <= count; l++) {
+      keep[l] = !values[l].length || percentile(values[l], 90) >= 1.0 ? 1 : 0;
+      if (!keep[l]) lowPatches++;
+    }
+    for (let i = 0; i < n; i++) out[i] = labels[i] && keep[labels[i]] ? 1 : 0;
+    out = dropSmall(out, w, h, Math.round(2.0 / area));
+    for (let i = 0; i < n; i++) if (!valid[i]) out[i] = 0;
+    const after = out.reduce((s, v) => s + v, 0);
+    return {
+      mask: out, chm,
+      info: {
+        used: true, field_coverage: coverage, is_height_raster: isHeight,
+        removed_by_height_m2: (before - after) * area, low_patches_removed: lowPatches,
+      },
+    };
+  }
+
+  // Clear cast shadow trimmed from the crown edges (gentle, as in the
+  // notebook): dark AND less green than leaves AND at ground level in the
+  // DSM; without a DSM, darker than the field's typical ground shadow.
+  function trimShadow(rgba, mask, valid, chm, w, h, pixel, darkY) {
+    const n = w * h, area = pixel * pixel;
+    const Y = new Float32Array(n), E = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const R = rgba[4 * i], G = rgba[4 * i + 1], B = rgba[4 * i + 2];
+      Y[i] = 0.299 * R + 0.587 * G + 0.114 * B;
+      E[i] = (2 * G - R - B) / (R + G + B + 1);
+    }
+    const ys = gauss(Y, w, h, 0.25 / pixel), es = gauss(E, w, h, 0.25 / pixel);
+    const groundExg = sample(es, 3, (i) => valid[i] && !mask[i] && ys[i] < darkY);
+    const canopyExg = sample(es, 3, (i) => mask[i] && ys[i] < darkY);
+    const enough = groundExg.length > 300 && canopyExg.length > 300;
+    const cut = enough ? 0.5 * (percentile(groundExg, 50) + percentile(canopyExg, 50)) : 0.12;
+    const veryDark = chm ? null : (enough ? percentile(sample(ys, 3, (i) => valid[i] && !mask[i] && ys[i] < darkY), 50) : 0.6 * darkY);
+    const shadow = new Uint8Array(n);
+    let candidates = 0;
+    for (let i = 0; i < n; i++) {
+      let s = mask[i] && ys[i] < darkY && es[i] < cut;
+      if (s) s = chm ? chm[i] < 0.5 : ys[i] < veryDark;  // NaN height: kept
+      if (s) { shadow[i] = 1; candidates++; }
+    }
+    if (!chm && candidates) {
+      // Image only: without height a dark leaf can look like shadow, so only
+      // the crown edge (1 m) is trimmed, and at most the darkest 3 % of the
+      // canopy.
+      const inside = edt(mask, w, h);
+      let canopyPx = 0;
+      const darkness = [];
+      for (let i = 0; i < n; i++) {
+        if (mask[i]) canopyPx++;
+        if (shadow[i] && inside[i] * pixel > 1.0) shadow[i] = 0;
+        if (shadow[i]) darkness.push(ys[i]);
+      }
+      const cap = Math.floor(0.03 * canopyPx);
+      if (darkness.length > cap) {
+        const limit = cap > 0 ? percentile(darkness, (100 * cap) / darkness.length) : -Infinity;
+        for (let i = 0; i < n; i++) if (shadow[i] && !(ys[i] <= limit)) shadow[i] = 0;
+      }
+    }
+    const keepPx = new Uint8Array(n);
+    for (let i = 0; i < n; i++) keepPx[i] = mask[i] && !shadow[i] ? 1 : 0;
+    let out = opening(keepPx, w, h, 0.2 / pixel);
+    const filled = fillSmallHoles(out, w, h, Math.round(1.0 / area));
+    for (let i = 0; i < n; i++) if (filled[i] && mask[i]) out[i] = 1;
+    out = dropSmall(out, w, h, Math.round(2.0 / area));
+    let removed = 0;
+    for (let i = 0; i < n; i++) { if (!valid[i]) out[i] = 0; if (mask[i] && !out[i]) removed++; }
+    return { mask: out, removed_m2: removed * area };
+  }
+
+  // ------------------------------------------------------------------ row alternation
+  // Crowns next to each other in a row always get opposite colours, also
+  // across a missing tree: the crowns on one side of the gap move one
+  // position toward it (next diagonal, other colour). Per row there are two
+  // ways to do it; the choice for all rows together with the fewest extra
+  // steps in the diagonals (then the fewest moved crowns) is found exactly
+  // by dynamic programming over the rows (as in the notebook).
+  function alternateAlongRows(pos, alive, stepDir) {
+    const shifted = pos.map((p) => (p ? p.slice() : null));
+    const moved = new Uint8Array(pos.length);
+    const rows = new Map();
+    pos.forEach((p, t) => {
+      if (!p || !alive[t]) return;
+      if (!rows.has(p[1])) rows.set(p[1], []);
+      rows.get(p[1]).push(t);
+    });
+    const rowIds = [...rows.keys()].sort((p, q) => p - q);
+    const optionsFor = (members, row) => {
+      members = members.slice().sort((p, q) => pos[p][0] - pos[q][0]);
+      const runs = [[members[0]]];
+      for (let k = 1; k < members.length; k++) {
+        if (pos[members[k]][0] - pos[members[k - 1]][0] > 1) runs.push([]);
+        runs[runs.length - 1].push(members[k]);
+      }
+      const gaps = runs.slice(0, -1).map((run, r) => pos[runs[r + 1][0]][0] - pos[run[run.length - 1]][0]);
+      const flip = [0];
+      for (const g of gaps) flip.push(flip[flip.length - 1] ^ (g % 2 === 0 ? 1 : 0));
+      const patterns = runs.length < 2 ? [flip] : [flip, flip.map((f) => 1 - f)];
+      return patterns.map((pattern) => {
+        const shift = new Map();
+        runs.forEach((run, r) => {
+          let s = 0;
+          if (pattern[r]) {
+            const intoLeft = r > 0 && !pattern[r - 1] && gaps[r - 1] % 2 === 0;
+            const intoRight = r < runs.length - 1 && !pattern[r + 1] && gaps[r] % 2 === 0;
+            s = intoLeft ? -1 : intoRight ? 1 : r > 0 ? -1 : 1;
+          }
+          for (const t of run) shift.set(t, s);
+        });
+        const diag = new Map();
+        for (const [t, s] of shift) diag.set((pos[t][0] + s) * stepDir[1] - row * stepDir[0], s);
+        let movedCount = 0;
+        for (const s of shift.values()) if (s) movedCount++;
+        return { shift, diag, moved: movedCount };
+      });
+    };
+    const between = (earlier, later) => {
+      let c = 0;
+      for (const [k, s] of later.diag) if (earlier.diag.has(k) && earlier.diag.get(k) !== s) c++;
+      return c;
+    };
+    const choices = rowIds.map((row) => optionsFor(rows.get(row), row));
+    let extraSteps = 0;
+    if (rowIds.length) {
+      const cost = [choices[0].map((o) => 0.01 * o.moved)], back = [choices[0].map(() => 0)];
+      for (let k = 1; k < rowIds.length; k++) {
+        const adjacent = rowIds[k] - rowIds[k - 1] === 1;
+        const here = [], prev = [];
+        for (const option of choices[k]) {
+          let best = 0, bestCost = Infinity;
+          choices[k - 1].forEach((p, pi) => {
+            const c = cost[k - 1][pi] + (adjacent ? between(p, option) : 0);
+            if (c < bestCost) { bestCost = c; best = pi; }
+          });
+          here.push(bestCost + 0.01 * option.moved);
+          prev.push(best);
+        }
+        cost.push(here); back.push(prev);
+      }
+      const last = cost[cost.length - 1];
+      let pick = last.indexOf(Math.min(...last));
+      const picked = new Array(rowIds.length);
+      for (let k = rowIds.length - 1; k >= 0; k--) { picked[k] = pick; pick = back[k][pick]; }
+      rowIds.forEach((row, k) => {
+        for (const [t, s] of choices[k][picked[k]].shift) if (s) { shifted[t][0] += s; moved[t] = 1; }
+        if (k && rowIds[k] - rowIds[k - 1] === 1) extraSteps += between(choices[k - 1][picked[k - 1]], choices[k][picked[k]]);
+      });
+    }
+    return { shifted, moved, extraSteps };
+  }
+
   // ------------------------------------------------------------------ main
   async function analyze(input, opts = {}, progress = () => {}) {
     const step = async (text) => { progress(text); await new Promise((r) => setTimeout(r, 0)); };
@@ -827,15 +1083,43 @@
     mask = dropSmall(mask, w, h, Math.round(2.0 / area));
     for (let i = 0; i < n; i++) if (!valid[i]) mask[i] = 0;
     for (const k of FEATURES) F[k] = null;
+    const rgbCanopyM2 = mask.reduce((s, v) => s + v, 0) * area;
+
+    // Elevation (DSM): only canopy that stands at least 1 m tall is a tree.
+    let chm = null, elevation = { used: false, reason: "no elevation file" };
+    if (input.surface) {
+      await step("Elevation (DSM): tree heights, removing grass and weeds …");
+      const refined = elevationRefine(input.surface, mask, P, valid, w, h, pixel);
+      mask = refined.mask; chm = refined.chm; elevation = refined.info;
+    }
+    P = null;
+
+    let shadowRemoved = 0;
+    if (opts.removeShadow !== false) {
+      await step("Trimming shadow from the crown edges …");
+      const trimmed = trimShadow(rgba, mask, valid, chm, w, h, pixel, thresholds.darkY);
+      mask = trimmed.mask; shadowRemoved = trimmed.removed_m2;
+    }
 
     await step("Splitting the canopy into crowns …");
-    const dist = edt(mask, w, h);
-    for (let i = 0; i < n; i++) dist[i] *= pixel;
-    const score = gauss(dist, w, h, 0.35 / pixel);
-    const md = Math.max(1, Math.round(3.0 / pixel));
+    let score, md, peakMin;
+    if (chm) {
+      // Treetops = local maxima of the smoothed canopy height model.
+      const height = new Float32Array(n);
+      for (let i = 0; i < n; i++) height[i] = mask[i] && Number.isFinite(chm[i]) ? chm[i] : 0;
+      score = gauss(height, w, h, 0.5 / pixel);
+      md = Math.max(1, Math.round(2.5 / pixel));
+      peakMin = 1.0;
+    } else {
+      const dist = edt(mask, w, h);
+      for (let i = 0; i < n; i++) dist[i] *= pixel;
+      score = gauss(dist, w, h, 0.35 / pixel);
+      md = Math.max(1, Math.round(3.0 / pixel));
+      peakMin = 0.35;
+    }
     const mx = maxFilter(score, w, h, md);
     let peaks = [];
-    for (let i = 0; i < n; i++) if (mask[i] && score[i] >= mx[i] && score[i] > 0.35) peaks.push(i);
+    for (let i = 0; i < n; i++) if (mask[i] && score[i] >= mx[i] && score[i] > peakMin) peaks.push(i);
     peaks.sort((p, q) => score[q] - score[p]);
     const taken = new Map(), cell = md;
     const kept = [];
@@ -984,6 +1268,44 @@
           if (seen.size < minArea) continue;
           const id = count + extra.length + 1;
           for (const u of seen) labels[u] = id;
+          // A neighbour must stay in one piece: canopy of it cut off on the
+          // far side of the new crown joins the new crown (never red, blue,
+          // red for one tree along the row).
+          const R0 = Math.max(0, sr - 2 * radius), R1 = Math.min(h - 1, sr + 2 * radius);
+          const C0 = Math.max(0, sc - 2 * radius), C1 = Math.min(w - 1, sc + 2 * radius);
+          for (const donor of [t, right]) {
+            const L = donor + 1;
+            const pieceOf = new Map();
+            let parts = 0;
+            const sizesOf = [];
+            for (let y = R0; y <= R1; y++) for (let x = C0; x <= C1; x++) {
+              const s0 = y * w + x;
+              if (labels[s0] !== L || pieceOf.has(s0)) continue;
+              parts++;
+              let size = 0;
+              const stack2 = [s0];
+              pieceOf.set(s0, parts);
+              while (stack2.length) {
+                const u = stack2.pop(), ux = u % w, uy = (u / w) | 0;
+                size++;
+                for (const v of [ux > C0 ? u - 1 : -1, ux < C1 ? u + 1 : -1, uy > R0 ? u - w : -1, uy < R1 ? u + w : -1]) {
+                  if (v >= 0 && labels[v] === L && !pieceOf.has(v)) { pieceOf.set(v, parts); stack2.push(v); }
+                }
+              }
+              sizesOf[parts] = size;
+            }
+            if (parts < 2) continue;
+            const rc = Math.floor(pts[donor][0] / pixel), rr = h - 1 - Math.floor(pts[donor][1] / pixel);
+            let main = pieceOf.get(rr * w + rc) || 0;
+            if (!main) for (let k = 1; k <= parts; k++) if (!main || sizesOf[k] > sizesOf[main]) main = k;
+            const touches = new Uint8Array(parts + 1);
+            for (const [u, k] of pieceOf) {
+              if (k === main) continue;
+              const ux = u % w;
+              for (const v of [ux > 0 ? u - 1 : -1, ux < w - 1 ? u + 1 : -1, u - w, u + w]) if (v >= 0 && v < n && labels[v] === id) touches[k] = 1;
+            }
+            for (const [u, k] of pieceOf) if (k !== main && touches[k]) labels[u] = id;
+          }
           extra.push({ pos: [i + q, j], spot, size: seen.size });
           void left;
         }
@@ -1009,7 +1331,8 @@
       const bb = box[l];
       if (x < bb[0]) bb[0] = x; if (y < bb[1]) bb[1] = y; if (x > bb[2]) bb[2] = x; if (y > bb[3]) bb[3] = y;
     }
-    for (let t = 0; t < total; t++) if (!area2[t + 1]) aliveAll[t] = 0;
+    // Crowns below 2 m² are not shown, so they take no part in the colours.
+    for (let t = 0; t < total; t++) if (area2[t + 1] * area < 2.0) aliveAll[t] = 0;
 
     // ---------------- diagonals
     await step("Drawing the EVEN / ODD diagonals …");
@@ -1022,11 +1345,17 @@
     const dir = [vector[0] / stepM, vector[1] / stepM];
     let normal = [-dir[1], dir[0]];
     if (normal[0] < 0) normal = [-normal[0], -normal[1]];
-    const index = pos.map((p) => (p ? p[0] * stepDir[1] - p[1] * stepDir[0] : null));
-    const keys = [...new Set(index.filter((k, t) => k !== null && aliveAll[t]))].sort((p, q) => p - q);
+    // Numbering from the planting grid (D01 / D02 stay at the same corner);
+    // each crown's diagonal from its position after the row alternation.
+    const baseIndex = pos.map((p) => (p ? p[0] * stepDir[1] - p[1] * stepDir[0] : null));
+    const alt = opts.alternateRows === false
+      ? { shifted: pos, moved: new Uint8Array(total), extraSteps: 0 }
+      : alternateAlongRows(pos, aliveAll, stepDir);
+    const index = alt.shifted.map((p) => (p ? p[0] * stepDir[1] - p[1] * stepDir[0] : null));
+    const keys = [...new Set(baseIndex.filter((k, t) => k !== null && aliveAll[t]))].sort((p, q) => p - q);
     const offset = (t) => pts[t][0] * normal[0] + pts[t][1] * normal[1];
     // D01 = outermost diagonal on the side the normal points to.
-    const meanOff = keys.map((k) => { let s = 0, c = 0; index.forEach((kk, t) => { if (kk === k && aliveAll[t]) { s += offset(t); c++; } }); return s / c; });
+    const meanOff = keys.map((k) => { let s = 0, c = 0; baseIndex.forEach((kk, t) => { if (kk === k && aliveAll[t]) { s += offset(t); c++; } }); return s / c; });
     let trend = 1;
     if (keys.length >= 2) {
       const mk = keys.reduce((s, k) => s + k, 0) / keys.length, mo = meanOff.reduce((s, o) => s + o, 0) / keys.length;
@@ -1198,6 +1527,71 @@
       diagonal[t] = best;
     }
 
+    // Off-grid crowns take the colour opposite to the crowns next to them
+    // along the row (nearest crown on each side within 1.5 tree spacings).
+    const parity = (d) => Math.abs(d) % 2;
+    let recoloured = 0;
+    if (opts.alternateRows !== false) {
+      const drawnLines = [...lines.entries()].filter(([, list]) => list.length);
+      for (let t = 0; t < total; t++) {
+        if (!aliveAll[t] || pos[t] || !diagonal[t]) continue;
+        const ut = U(knots[t]), vt = V(knots[t]);
+        let left = -1, right = -1, dl = Infinity, dr = Infinity;
+        for (let s = 0; s < total; s++) {
+          if (s === t || !aliveAll[s] || !diagonal[s]) continue;
+          const du = U(knots[s]) - ut, dv = V(knots[s]) - vt;
+          if (Math.abs(dv) >= 0.4 * rowSpacing || du === 0 || Math.abs(du) > 1.5 * inRow) continue;
+          if (du > 0 && du < dr) { dr = du; right = s; }
+          if (du < 0 && -du < dl) { dl = -du; left = s; }
+        }
+        const sides = [left, right].filter((s) => s >= 0).map((s) => parity(diagonal[s]));
+        if (!sides.length || sides.some((p) => p !== sides[0]) || parity(diagonal[t]) !== sides[0]) continue;
+        let best = 0, bestD = Infinity;
+        for (const [number, list] of drawnLines) {
+          if (parity(number) === sides[0]) continue;
+          for (const piece of list) for (let s = 0; s < piece.length; s += 2) {
+            const d = Math.hypot(piece[s][0] - pts[t][0], piece[s][1] - pts[t][1]);
+            if (d < bestD) { bestD = d; best = number; }
+          }
+        }
+        if (best) { diagonal[t] = best; recoloured++; }
+      }
+    }
+
+    // Check (the planting rule): neighbouring crowns along every row must
+    // have opposite colours.
+    let rowPairs = 0, rowSame = 0;
+    const byRow = new Map();
+    for (let t = 0; t < total; t++) if (aliveAll[t] && pos[t]) {
+      if (!byRow.has(pos[t][1])) byRow.set(pos[t][1], []);
+      byRow.get(pos[t][1]).push(t);
+    }
+    for (const list of byRow.values()) {
+      list.sort((p, q) => pos[p][0] - pos[q][0]);
+      for (let k = 1; k < list.length; k++) {
+        rowPairs++;
+        if (parity(diagonal[list[k]]) === parity(diagonal[list[k - 1]])) rowSame++;
+      }
+    }
+    let crossedOwn = 0, onGrid = 0;
+    for (let t = 0; t < total; t++) {
+      if (!aliveAll[t] || !pos[t]) continue;
+      onGrid++;
+      if ((hits.get(t + 1) || new Map()).has(diagonal[t])) crossedOwn++;
+    }
+
+    // Tree height (DSM) of every crown.
+    let heights = null;
+    if (chm) {
+      await step("Tree height of every crown …");
+      const values = Array.from({ length: total + 1 }, () => []);
+      for (let i = 0; i < n; i++) { const l = labels[i]; if (l && Number.isFinite(chm[i])) values[l].push(chm[i]); }
+      heights = values.map((v) => (v.length ? {
+        median: percentile(v, 50), p90: percentile(v, 90), top: percentile(v, 99),
+        mean: v.reduce((s, x) => s + x, 0) / v.length,
+      } : null));
+    }
+
     // ---------------- polygons
     await step("Outlining the crowns …");
     const crowns = [];
@@ -1214,6 +1608,8 @@
       if (!pos[t]) flags.push("OFF_GRID");
       if (inferred[t]) flags.push("INFERRED_FROM_SPACING");
       if (pieces[t] > 1) flags.push("MERGED_SPLIT_CROWN");
+      if (alt.moved[t]) flags.push("MOVED_ACROSS_GAP");
+      const hgt = heights && heights[t + 1];
       crowns.push({
         id: "C" + String(t + 1).padStart(5, "0"),
         polys,
@@ -1223,6 +1619,10 @@
         grid_row: pos[t] ? pos[t][1] - minJ + 1 : null,
         grid_tree: pos[t] ? pos[t][0] - minI + 1 : null,
         flags: flags.join(";"),
+        height_median_m: hgt ? hgt.median : null,
+        height_p90_m: hgt ? hgt.p90 : null,
+        height_top_m: hgt ? hgt.top : null,
+        height_mean_m: hgt ? hgt.mean : null,
       });
     }
     let fieldPixels = 0, canopyPixels = 0;
@@ -1239,6 +1639,18 @@
         diagonal_image_angle_deg: angle(vector),
         diagonal_spacing_m: pitch,
         diagonal_count: lines.size,
+        alternate_along_rows: opts.alternateRows !== false,
+        crowns_moved_across_gap: alt.moved.reduce((s, v, t) => s + (v && aliveAll[t] ? 1 : 0), 0),
+        diagonal_extra_steps_from_moves: alt.extraSteps,
+        off_grid_crowns_recoloured_to_alternate: recoloured,
+        row_neighbours: rowPairs,
+        row_neighbours_same_colour: rowSame,
+        crowns_crossed_by_their_diagonal: onGrid ? crossedOwn / onGrid : null,
+      },
+      segmentation: {
+        rgb_canopy_m2: rgbCanopyM2,
+        elevation,
+        cast_shadow: { used: opts.removeShadow !== false, shadow_removed_m2: shadowRemoved },
       },
       field_area_m2: fieldPixels * area,
       canopy_area_m2: canopyPixels * area,

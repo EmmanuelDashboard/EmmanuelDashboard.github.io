@@ -507,3 +507,18 @@ input[type="number"] {
   .map-wrap { height: 90vh; }
   .topbar { box-shadow: none; }
 }
+
+/* ---------- thinning plan + quality checks ---------- */
+#card-plan .facts { margin-top: 8px; }
+#card-plan .facts dd { text-align: right; }
+#plan-note { margin: 8px 0 10px; line-height: 1.45; }
+.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.checks li { position: relative; padding-left: 22px; font-size: 13px; line-height: 1.4; }
+.checks li::before { position: absolute; left: 0; top: 0; width: 16px; text-align: center; font-weight: 700; }
+.checks li.ok::before { content: "\2713"; color: var(--ok); }
+.checks li.warn::before { content: "!"; color: var(--warn); }
+.checks li.info::before { content: "\2022"; color: var(--muted); }
+.link-btn { background: none; border: 0; padding: 0; color: var(--focus); font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; }
+.link-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.dsm-pick { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.dsm-name { flex: 1 1 160px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }

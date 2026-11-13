@@ -338,11 +338,11 @@
     try {
       const zip = files.find((f) => /\.zip$/i.test(f.name));
       const notebookFiles = files.some((f) => basename(f.name) === "crowns_wgs84.geojson");
-      const image = files.find((f) => IMAGE_FILE.test(f.name));
+      const images = files.filter((f) => IMAGE_FILE.test(f.name));
       if (zip) {
         await loadZip(zip, zip.name);
-      } else if (image && !notebookFiles) {
-        await analyseImage(image);
+      } else if (images.length && !notebookFiles) {
+        await analyseImage(images);
       } else {
         const byName = new Map(files.map((f) => [basename(f.name), f]));
         await loadEntries({
@@ -423,9 +423,123 @@
     return null;
   }
 
-  function askAnalysis(info) {
+  // 'elevation' for a one-band GeoTIFF (DSM / DEM), otherwise 'image'.
+  async function fileKind(file) {
+    if (!/\.tiff?$/i.test(file.name)) return "image";
+    try {
+      const tiff = await GeoTIFF.fromBlob(file);
+      const image = await tiff.getImage(0);
+      return image.getSamplesPerPixel() < 3 ? "elevation" : "image";
+    } catch (e) {
+      return "image";
+    }
+  }
+
+  // EPSG code of a GeoTIFF's coordinates, and a proj4 definition for it.
+  function epsgOf(keys) {
+    if (!keys) return null;
+    if (keys.ProjectedCSTypeGeoKey && keys.ProjectedCSTypeGeoKey !== 32767) return keys.ProjectedCSTypeGeoKey;
+    return keys.GeographicTypeGeoKey || null;
+  }
+  function projDef(code) {
+    if ([4326, 4269, 4258].includes(code)) return "EPSG:4326";
+    if ([3857, 3785, 900913, 102100, 102113].includes(code)) return "EPSG:3857";
+    return UTM_DEF(code);
+  }
+
+  // The elevation raster (DSM) on the analysis grid of the image: W x H
+  // pixels over the image's extent, NaN where there is no elevation.
+  async function readSurface(file, info, W, H) {
+    const tiff = await GeoTIFF.fromBlob(file);
+    const image = await tiff.getImage(0);
+    if (image.getSamplesPerPixel() !== 1) throw new Error("it has more than one band (an elevation file has one)");
+    const rKeys = info.image.getGeoKeys(), dKeys = image.getGeoKeys();
+    const rRes = info.image.getResolution(), rOrig = info.image.getOrigin();
+    const dRes = image.getResolution(), dOrig = image.getOrigin();
+    const dW = image.getWidth(), dH = image.getHeight();
+    const rCode = epsgOf(rKeys), dCode = epsgOf(dKeys);
+    let toDsm = null;
+    if (rCode && dCode && rCode !== dCode) {
+      const a = projDef(rCode), b = projDef(dCode);
+      if (!a || !b) throw new Error(`it uses another coordinate system (EPSG:${dCode}) than the image (EPSG:${rCode}); export both in the same one`);
+      const p = proj4(a, b);
+      toDsm = (x, y) => p.forward([x, y]);
+    }
+    // Image-grid pixel centre -> image coordinates.
+    const sx = (info.width * rRes[0]) / W, sy = (info.height * rRes[1]) / H;
+    const X = (x) => rOrig[0] + (x + 0.5) * sx, Y = (y) => rOrig[1] + (y + 0.5) * sy;
+
+    // Read the DSM at about the analysis resolution.
+    let scale = 1;
+    if (!toDsm) scale = Math.min(1, Math.abs(dRes[0]) / Math.abs(sx));
+    else scale = Math.min(1, (2 * W) / dW);
+    let rw = Math.max(16, Math.round(dW * scale)), rh = Math.max(16, Math.round(dH * scale));
+    if (rw * rh > 24e6) { const k = Math.sqrt(24e6 / (rw * rh)); rw = Math.round(rw * k); rh = Math.round(rh * k); }
+    const data = (await image.readRasters({ samples: [0], width: rw, height: rh }))[0];
+    const nodataRaw = typeof image.getGDALNoData === "function" ? image.getGDALNoData() : null;
+    const nodata = nodataRaw === null || nodataRaw === undefined ? null : Number(nodataRaw);
+    const cx = (dW * dRes[0]) / rw, cy = (dH * dRes[1]) / rh;
+    const valueAt = (px, py) => {
+      const c = Math.floor((px - dOrig[0]) / cx), r = Math.floor((py - dOrig[1]) / cy);
+      if (c < 0 || r < 0 || c >= rw || r >= rh) return NaN;
+      const v = data[r * rw + c];
+      return !Number.isFinite(v) || (nodata !== null && v === nodata) || v < -1e5 || v > 1e5 ? NaN : v;
+    };
+
+    const surface = new Float32Array(W * H);
+    let inside = 0;
+    if (!toDsm) {
+      for (let y = 0; y < H; y++) {
+        const py = Y(y);
+        for (let x = 0; x < W; x++) {
+          const v = valueAt(X(x), py);
+          surface[y * W + x] = v;
+          if (Number.isFinite(v)) inside++;
+        }
+      }
+    } else {
+      // Another coordinate system: transform a coarse grid, interpolate.
+      const k = 16, gw = Math.ceil(W / k) + 1, gh = Math.ceil(H / k) + 1;
+      const gx = new Float64Array(gw * gh), gy = new Float64Array(gw * gh);
+      for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+        const [u, v] = toDsm(X(Math.min(W - 1, i * k)), Y(Math.min(H - 1, j * k)));
+        gx[j * gw + i] = u; gy[j * gw + i] = v;
+      }
+      for (let y = 0; y < H; y++) {
+        const fj = Math.min(gh - 1.001, y / k), j0 = Math.floor(fj), tj = fj - j0;
+        for (let x = 0; x < W; x++) {
+          const fi = Math.min(gw - 1.001, x / k), i0 = Math.floor(fi), ti = fi - i0;
+          const a00 = j0 * gw + i0, a01 = a00 + 1, a10 = a00 + gw, a11 = a10 + 1;
+          const u = (1 - tj) * ((1 - ti) * gx[a00] + ti * gx[a01]) + tj * ((1 - ti) * gx[a10] + ti * gx[a11]);
+          const v = (1 - tj) * ((1 - ti) * gy[a00] + ti * gy[a01]) + tj * ((1 - ti) * gy[a10] + ti * gy[a11]);
+          const z = valueAt(u, v);
+          surface[y * W + x] = z;
+          if (Number.isFinite(z)) inside++;
+        }
+      }
+    }
+    if (inside < 0.2 * W * H) throw new Error("it does not cover this image (another field?)");
+    return surface;
+  }
+
+  function askAnalysis(info, dsmGiven) {
     return new Promise((resolve) => {
       const modal = $("analyse-modal");
+      let dsmFile = info.geo ? dsmGiven || null : null;
+      const showDsm = () => {
+        $("an-dsm-name").textContent = dsmFile ? dsmFile.name : "None: image only";
+        $("an-dsm-clear").hidden = !dsmFile;
+      };
+      $("an-dsm-row").hidden = !info.geo;
+      $("an-dsm-pick").onclick = () => $("an-dsm").click();
+      $("an-dsm-clear").onclick = () => { dsmFile = null; showDsm(); };
+      $("an-dsm").onchange = () => {
+        const f = $("an-dsm").files[0];
+        if (f) dsmFile = f;
+        $("an-dsm").value = "";
+        showDsm();
+      };
+      showDsm();
       $("an-file").textContent = info.file.name;
       const facts = [["Image", `${fmtInt(info.width)} × ${fmtInt(info.height)} pixels`]];
       if (info.geo) {
@@ -447,6 +561,7 @@
           designFt: design === "auto" ? null : design.split(",").map(Number),
           budget: Number($("an-detail").value) * 1e6,
           pixel: info.geo ? null : Number($("an-pixel").value) / 100,
+          dsm: dsmFile,
         });
       });
     });
@@ -549,12 +664,20 @@
     return URL.createObjectURL(blob);
   }
 
-  async function analyseImage(file) {
-    setLoading("Opening " + file.name + " …");
+  async function analyseImage(files) {
+    files = Array.isArray(files) ? files : [files];
+    setLoading("Opening " + files.map((f) => f.name).join(" + ") + " …");
     await nextFrame();
-    let info;
-    try { info = await inspectImage(file); } finally { setLoading(null); }
-    const choice = await askAnalysis(info);
+    let info = null, dsm = null;
+    try {
+      for (const f of files) {
+        if ((await fileKind(f)) === "elevation") { if (!dsm) dsm = f; }
+        else if (!info) info = await inspectImage(f);
+      }
+    } finally { setLoading(null); }
+    if (!info) throw new Error("This is an elevation (DSM) file. Drop it together with the drone image (orthomosaic) of the same field, or add it in the window that opens for the image.");
+    const file = info.file;
+    const choice = await askAnalysis(info, dsm);
     if (!choice) return;
     const px = info.geo ? info.geo.px : choice.pixel, py = info.geo ? info.geo.py : choice.pixel;
     if (!(px > 0 && py > 0)) throw new Error("Enter the ground size of one pixel.");
@@ -569,14 +692,29 @@
     await nextFrame();
     const rgba = await readPixels(info, W, H);
     const url = await previewUrl(rgba, W, H);
+    let surface = null, dsmProblem = "";
+    if (choice.dsm) {
+      setLoading("Reading the elevation (DSM) …");
+      await nextFrame();
+      try {
+        surface = await readSurface(choice.dsm, info, W, H);
+      } catch (err) {
+        console.warn(err);
+        dsmProblem = `${choice.dsm.name} was not used: ${err.message || err}.`;
+      }
+    }
     let result;
     try {
-      result = await PecanAnalysis.analyze({ rgba, width: W, height: H, pixel }, { designFt: choice.designFt, directionHintDeg: 114 }, (text) => setLoading(text));
+      result = await PecanAnalysis.analyze({ rgba, width: W, height: H, pixel, surface }, { designFt: choice.designFt, directionHintDeg: 114 }, (text) => setLoading(text));
     } catch (err) {
       URL.revokeObjectURL(url);
       setLoading(null);
       throw err;
     }
+    surface = null;
+    const elevation = result.segmentation.elevation;
+    if (choice.dsm && !dsmProblem && !elevation.used) dsmProblem = `${choice.dsm.name} was not used: ${elevation.reason}.`;
+    if (choice.dsm) elevation.file = choice.dsm.name;
     setLoading("Drawing the field …");
     await nextFrame();
     buildFromAnalysis(result, {
@@ -585,7 +723,11 @@
       previewUrl: url, widthM: W * pixel, heightM: H * pixel,
     });
     setLoading(null);
-    toast(`Analysed ${file.name} in ${Math.round((performance.now() - t0) / 1000)} s: ${fmtInt(state.crowns.size)} crowns, ${state.diagonals.size} diagonals.`, "", 6000);
+    const took = Math.round((performance.now() - t0) / 1000);
+    toast(dsmProblem
+      ? `Analysed ${file.name} from the image only. ${dsmProblem}`
+      : `Analysed ${file.name}${elevation.used ? " with its elevation (DSM)" : ""} in ${took} s: ${fmtInt(state.crowns.size)} crowns, ${state.diagonals.size} diagonals.`,
+      dsmProblem ? "error" : "", dsmProblem ? 10000 : 6000);
   }
 
   async function loadZip(blob, name) {
@@ -766,7 +908,8 @@
       pixel_m: meta.pixel,
       diagonal_settings: result.settings,
       field_area_m2: result.field_area_m2,
-      segmentation: { elevation: { used: false } },
+      canopy_area_m2: result.canopy_area_m2,
+      segmentation: result.segmentation || { elevation: { used: false } },
       start: { diagonal: 2 },
     };
     state.proj = null;
@@ -791,6 +934,8 @@
         props: {
           crown_id: c.id, area_m2: c.area, diagonal: c.diagonal, grid_row: c.grid_row, grid_tree: c.grid_tree,
           top_x: c.top[0] + state.origin[0], top_y: c.top[1] + state.origin[1], review_flags: c.flags,
+          height_median_m: c.height_median_m, height_p90_m: c.height_p90_m,
+          height_top_m: c.height_top_m, height_mean_m: c.height_mean_m,
         },
         geomWgs: null,
         polys: c.polys,
@@ -840,7 +985,8 @@
     state.loaded = true;
 
     $("dropzone").hidden = true;
-    for (const id of ["card-field", "card-totals", "card-start", "card-layers", "card-edit", "card-diagonals", "chart-panel"]) $(id).hidden = false;
+    for (const id of ["card-field", "card-totals", "card-plan", "card-checks", "card-start", "card-layers", "card-edit", "card-diagonals", "chart-panel"]) $(id).hidden = false;
+    state.conflictAt = -1;
     $("btn-export").disabled = false;
 
     map.invalidateSize();
@@ -1165,7 +1311,137 @@
     fillTable();
     fillStartFacts();
     fillSelected();
+    fillPlan();
+    fillChecks();
     updateChart();
+  }
+
+  // ------------------------------------------------------------------ decision support
+  const pct = (part, whole) => (whole > 0 ? `${fmt1((100 * part) / whole)} %` : "–");
+
+  function meanHeight(fam) {
+    const hs = [];
+    for (const c of state.crowns.values()) {
+      if (c.removed || c.excluded || family(c.diagonal) !== fam) continue;
+      const v = c.props && c.props.height_top_m;
+      if (v !== null && v !== undefined && v !== "" && Number.isFinite(Number(v))) hs.push(Number(v));
+    }
+    return hs.length ? hs.reduce((s, x) => s + x, 0) / hs.length : null;
+  }
+
+  // What thinning one family of diagonals does to the orchard.
+  function fillPlan() {
+    const t = state.totals;
+    if (!t) return;
+    const fam = $("plan-family").value || "EVEN";
+    const other = fam === "EVEN" ? "ODD" : "EVEN";
+    const rem = t.fam[fam], keep = t.fam[other];
+    const field = state.summary && Number(state.summary.field_area_m2);
+    const ds = (state.summary && state.summary.diagonal_settings) || {};
+    const facts = [
+      ["Trees to remove", `${fmtInt(rem.count)} · ${pct(rem.count, t.all.count)}`],
+      ["Canopy removed", `${fmtArea(rem.area)} · ${pct(rem.area, t.all.area)}`],
+      ["Trees left", fmtInt(keep.count)],
+      ["Canopy left", fmtArea(keep.area)],
+    ];
+    if (field > 0) facts.push(["Canopy cover", `${pct(t.all.area, field)} → ${pct(keep.area, field)}`]);
+    const hr = meanHeight(fam), hk = meanHeight(other);
+    if (hr !== null && hk !== null) facts.push(["Height removed / left", `${fmt1(hr)} / ${fmt1(hk)} m`]);
+    if (ds.in_row_spacing_m) {
+      const after = 2 * ds.in_row_spacing_m;
+      facts.push(["Spacing in row after", `${fmt1(after)} m · ${Math.round(after / 0.3048)} ft`]);
+    }
+    facts.push(["Diagonals to remove", String(rem.diagonals)]);
+    $("plan-facts").innerHTML = facts.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join("");
+    const firstOdd = [...state.diagonals.values()].filter((d) => d.family === "ODD" && d.pieces.length).map((d) => d.number).sort((a, b) => a - b)[0];
+    $("plan-note").textContent = fam === "EVEN"
+      ? `Every blue (EVEN) tree is removed, every red (ODD) tree stays. Start on ${state.start !== null ? dname(state.start) : "the START line"} and follow the arrows. Compare: removing ODD instead takes ${fmtArea(keep.area)} (${fmtInt(keep.count)} trees).`
+      : `Every red (ODD) tree is removed, every blue (EVEN) tree stays. Start on ${firstOdd !== undefined ? dname(firstOdd) : "the first ODD line"} and follow the arrows. Compare: removing EVEN instead takes ${fmtArea(keep.area)} (${fmtInt(keep.count)} trees).`;
+  }
+
+  // Neighbouring crowns in a row with the same colour (after corrections).
+  function rowConflicts() {
+    const rows = new Map();
+    for (const c of state.crowns.values()) {
+      if (c.removed || c.excluded) continue;
+      const p = c.props || {};
+      const r = Number(p.grid_row), k = Number(p.grid_tree), b = Number(p.planting_block || 1);
+      if (!Number.isFinite(r) || !Number.isFinite(k) || p.grid_row === null || p.grid_row === "") continue;
+      const key = b + ":" + r;
+      if (!rows.has(key)) rows.set(key, []);
+      rows.get(key).push([k, c]);
+    }
+    let pairs = 0;
+    const bad = [];
+    for (const list of rows.values()) {
+      list.sort((x, y) => x[0] - y[0]);
+      for (let i = 1; i < list.length; i++) {
+        pairs++;
+        if (family(list[i][1].diagonal) === family(list[i - 1][1].diagonal)) bad.push([list[i - 1][1], list[i][1]]);
+      }
+    }
+    return { pairs, bad };
+  }
+
+  function fillChecks() {
+    const s = state.summary || {};
+    const ds = s.diagonal_settings || {};
+    const el = (s.segmentation && s.segmentation.elevation) || {};
+    const rc = rowConflicts();
+    state.conflicts = rc.bad;
+    const offGrid = [...state.crowns.values()].filter((c) => !c.removed && !c.excluded && /OFF_GRID/.test((c.props && c.props.review_flags) || "")).length;
+    const items = [];
+    items.push(rc.pairs
+      ? [rc.bad.length === 0, rc.bad.length === 0
+        ? `Blue / red alternate along every row: 0 of ${fmtInt(rc.pairs)} neighbours share a colour.`
+        : `${rc.bad.length} of ${fmtInt(rc.pairs)} row neighbours share a colour.`, rc.bad.length ? "Show" : ""]
+      : [null, "No row positions in these results (older notebook version).", ""]);
+    items.push([!!el.used, el.used
+      ? `Elevation (DSM) used${el.file ? ` (${el.file})` : el.path ? ` (${String(el.path).split(/[\\/]/).pop()})` : ""}: grass and weeds lower than 1 m are not counted; treetops from tree height.`
+      : `No elevation (DSM)${el.reason ? `: ${el.reason}` : ""}. Add the DSM of the same flight for the most accurate canopy.`, ""]);
+    if (Number.isFinite(ds.crowns_crossed_by_their_diagonal)) items.push([ds.crowns_crossed_by_their_diagonal >= 0.97, `${fmt1(100 * ds.crowns_crossed_by_their_diagonal)} % of crowns are crossed by their own diagonal line.`, ""]);
+    items.push([offGrid === 0 ? true : null, offGrid ? `${fmtInt(offGrid)} crown${offGrid === 1 ? "" : "s"} off the planting grid (flag OFF_GRID): worth a look.` : "Every crown sits on the planting grid.", ""]);
+    const shadow = s.segmentation && s.segmentation.cast_shadow;
+    if (shadow && Number.isFinite(shadow.shadow_removed_m2)) items.push([true, `Cast shadow trimmed from crown edges: ${fmtArea(shadow.shadow_removed_m2)}.`, ""]);
+    $("checks-list").innerHTML = items.map(([ok, text, action]) =>
+      `<li class="${ok === true ? "ok" : ok === false ? "warn" : "info"}"><span>${escapeHtml(text)}</span>${action ? ` <button type="button" class="link-btn" data-check="${action}">${action}</button>` : ""}</li>`).join("");
+  }
+
+  function showNextConflict() {
+    const list = state.conflicts || [];
+    if (!list.length) return;
+    state.conflictAt = ((state.conflictAt ?? -1) + 1) % list.length;
+    const [a] = list[state.conflictAt];
+    selectCrown(a.id, true);
+    toast(`Row neighbours with the same colour ${state.conflictAt + 1} of ${list.length}: ${list[state.conflictAt][0].id} and ${list[state.conflictAt][1].id}. Move one to the next diagonal with ‹ ›.`, "", 6000);
+  }
+
+  // The trees to remove, for the field crew (GPS position of each crown).
+  function exportPlan() {
+    const fam = $("plan-family").value || "EVEN";
+    const chosen = activeCrowns().filter((c) => !c.excluded && family(c.diagonal) === fam);
+    const order = new Map();
+    const byDiag = new Map();
+    for (const c of chosen) {
+      if (!byDiag.has(c.diagonal)) byDiag.set(c.diagonal, []);
+      byDiag.get(c.diagonal).push(c);
+    }
+    for (const list of byDiag.values()) {
+      list.sort((a, b) => polysCentroid(b.polys)[1] - polysCentroid(a.polys)[1]);
+      list.forEach((c, k) => order.set(c.id, k + 1));
+    }
+    const header = ["crown_id", "diagonal", "family", "tree_on_diagonal", "grid_row", "grid_tree", "canopy_m2", "height_top_m"];
+    header.push(...(state.toLonLat ? ["longitude", "latitude"] : ["x_m", "y_m"]));
+    const lines = [csvRow(header)];
+    chosen.sort((a, b) => a.diagonal - b.diagonal || order.get(a.id) - order.get(b.id));
+    for (const c of chosen) {
+      const p = c.props || {};
+      const [x, y] = polysCentroid(c.polys);
+      const where = state.toLonLat ? state.toLonLat(x, y).map((v) => v.toFixed(8)) : [x.toFixed(2), y.toFixed(2)];
+      const height = p.height_top_m !== null && p.height_top_m !== undefined && p.height_top_m !== "" && Number.isFinite(Number(p.height_top_m)) ? Number(p.height_top_m).toFixed(2) : "";
+      lines.push(csvRow([c.id, dname(c.diagonal), fam, order.get(c.id), p.grid_row ?? "", p.grid_tree ?? "", c.area.toFixed(2), height, ...where]));
+    }
+    download(`${fileBase()}_trees_to_remove_${fam}.csv`, lines.join("\n") + "\n");
   }
 
   function fillFieldCard() {
@@ -1174,8 +1450,9 @@
     $("field-name").textContent = "";
     const facts = [];
     facts.push([s.source === "browser" ? "Image" : "Results", state.name]);
+    const elevationUsed = !!(s.segmentation && s.segmentation.elevation && s.segmentation.elevation.used);
     if (s.source === "browser") {
-      facts.push(["Analysis", "in this browser (RGB)"]);
+      facts.push(["Analysis", elevationUsed ? "in this browser (image + DSM)" : "in this browser (image only)"]);
       facts.push(["Pixel size", `${fmt1(s.pixel_m * 100)} cm`]);
     }
     if (ds.in_row_spacing_m) facts.push(["Tree spacing", `${fmt1(ds.in_row_spacing_m)} m × ${fmt1(ds.row_spacing_m)} m`]);
@@ -1184,7 +1461,7 @@
     else facts.push(["Diagonals", String(state.diagonals.size)]);
     if (s.field_area_m2) facts.push(["Field area", `${fmt1(s.field_area_m2 / 10000)} ha`]);
     facts.push([s.source === "browser" ? "Crowns found" : "Crowns (notebook)", fmtInt(state.crowns.size)]);
-    if (s.source !== "browser" && s.segmentation && s.segmentation.elevation) facts.push(["Elevation (DSM)", s.segmentation.elevation.used ? "used" : "not used"]);
+    if (s.segmentation && s.segmentation.elevation) facts.push(["Elevation (DSM)", elevationUsed ? "used: tree heights" : "not used"]);
     $("field-facts").innerHTML = facts.map(([k, v]) => `<dt>${k}</dt><dd title="${String(v).replace(/"/g, "&quot;")}">${escapeHtml(String(v))}</dd>`).join("");
     $("field-facts").querySelector("dd").style.cssText = "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px;justify-self:end";
   }
@@ -1796,6 +2073,7 @@
       if (!kind) return;
       if (kind === "diagonals") exportDiagonals();
       if (kind === "crowns-csv") exportCrownsCsv();
+      if (kind === "plan") exportPlan();
       if (kind === "crowns-geojson") exportGeoJson();
       if (kind === "log") exportLog();
       if (kind === "print") window.print();
@@ -1806,6 +2084,12 @@
 
     for (const id of ["layer-image", "layer-crowns", "layer-even", "layer-odd", "layer-labels"]) $(id).addEventListener("change", applyLineVisibility);
     $("fill-opacity").addEventListener("input", (e) => { state.fillOpacity = +e.target.value; restyleCrowns(); });
+
+    $("plan-family").addEventListener("change", fillPlan);
+    $("btn-plan-export").addEventListener("click", exportPlan);
+    $("checks-list").addEventListener("click", (e) => {
+      if (e.target.dataset && e.target.dataset.check === "Show") showNextConflict();
+    });
 
     $("start-select").addEventListener("change", (e) => setStart(+e.target.value));
     $("btn-zoom-start").addEventListener("click", () => {
@@ -1920,7 +2204,7 @@
   }
 
   window.PecanDashboard = {
-    state, openFiles, selectCrown, selectDiagonal, undo, redo, setStart, exportDiagonals,
+    state, openFiles, selectCrown, selectDiagonal, undo, redo, setStart, exportDiagonals, exportPlan, rowConflicts,
     reassign: (id, to) => reassign(state.crowns.get(id), to),
     diagonalAt: (x, y) => diagonalAt([x - state.origin[0], y - state.origin[1]]),
   };
