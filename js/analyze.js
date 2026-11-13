@@ -1036,6 +1036,118 @@
     return { shifted, moved, extraSteps };
   }
 
+  // ------------------------------------------------------------------ input
+  // Shared by the dashboard and the Kaggle notebook, so both analyse exactly
+  // the same pixels: the full-resolution image is averaged onto the analysis
+  // grid (every source pixel goes to exactly one grid cell; integer sums, so
+  // the order of reading does not matter), and the elevation (DSM) is sampled
+  // at the centre of every grid cell.
+  const DETAIL_PIXELS = { fast: 3e6, standard: 5e6, fine: 9e6 };
+
+  // Ground size of one image pixel in metres, from its coordinate system.
+  function groundPixelSize({ kind, rx, ry, miny, maxy, unitFactor = 1 }) {
+    rx = Math.abs(rx); ry = Math.abs(ry);
+    if (kind === "geographic") {
+      const lat0 = ((miny + maxy) / 2) * Math.PI / 180;
+      return { px: rx * 111320 * Math.cos(lat0), py: ry * 110574 };
+    }
+    if (kind === "webmercator") {
+      const k = Math.cos(2 * Math.atan(Math.exp((miny + maxy) / 2 / 6378137)) - Math.PI / 2);
+      return { px: rx * k, py: ry * k };
+    }
+    return { px: rx * unitFactor, py: ry * unitFactor };
+  }
+
+  // Analysis grid: at most `budget` pixels on the field (Detail setting).
+  function gridSize(width, height, px, py, fieldFraction, budget) {
+    const total = Math.min(budget / Math.max(0.05, fieldFraction), 16e6);
+    const native = Math.sqrt(px * py);
+    const pixel = Math.max(native, Math.sqrt((width * px * height * py) / total), 0.03);
+    return {
+      W: Math.max(64, Math.round((width * px) / pixel)),
+      H: Math.max(64, Math.round((height * py) / pixel)),
+      pixel,
+    };
+  }
+
+  // Field fraction of the image: share of pixels with alpha > 127.
+  function countField(alpha) {
+    let inside = 0;
+    for (let i = 0; i < alpha.length; i++) if (alpha[i] > 127) inside++;
+    return inside;
+  }
+
+  // Averages full-resolution rows onto the W x H grid. bands = [R, G, B] (+ A).
+  function createGrid(width, height, W, H, { hasAlpha = false, nodata = null, bits = 8 } = {}) {
+    const n = W * H;
+    const sum = [new Float64Array(n), new Float64Array(n), new Float64Array(n)];
+    const good = new Uint32Array(n), all = new Uint32Array(n);
+    const colOf = new Int32Array(width);
+    for (let c = 0; c < width; c++) colOf[c] = Math.min(W - 1, Math.floor(((c + 0.5) * W) / width));
+    const nd = nodata === null || nodata === undefined || Number.isNaN(Number(nodata)) ? null : Number(nodata);
+    return {
+      addRows(r0, rows, bands) {
+        const [R, G, B, A] = bands;
+        for (let k = 0; k < rows; k++) {
+          const r = r0 + k;
+          const o = Math.min(H - 1, Math.floor(((r + 0.5) * H) / height)) * W;
+          for (let c = 0; c < width; c++) {
+            const s = k * width + c, i = o + colOf[c];
+            all[i]++;
+            let ok = hasAlpha ? A[s] > 127 : true;
+            if (ok && !hasAlpha && nd !== null && R[s] === nd && G[s] === nd && B[s] === nd) ok = false;
+            if (!ok) continue;
+            good[i]++;
+            sum[0][i] += R[s]; sum[1][i] += G[s]; sum[2][i] += B[s];
+          }
+        }
+      },
+      finish() {
+        const rgba = new Uint8ClampedArray(n * 4);
+        const mean = [new Float64Array(n), new Float64Array(n), new Float64Array(n)];
+        for (let i = 0; i < n; i++) {
+          if (good[i]) for (let c = 0; c < 3; c++) mean[c][i] = sum[c][i] / good[i];
+          rgba[4 * i + 3] = good[i] * 2 > all[i] ? 255 : 0;
+        }
+        if (bits > 8) {  // 16-bit: stretch the 1st-99th percentiles to 0-255
+          for (let c = 0; c < 3; c++) {
+            const vals = [];
+            for (let i = 0; i < n; i += 7) if (rgba[4 * i + 3]) vals.push(mean[c][i]);
+            vals.sort((p, q) => p - q);
+            const lo = vals[Math.floor(0.01 * (vals.length - 1))] || 0, hi = vals[Math.floor(0.99 * (vals.length - 1))] || 1;
+            for (let i = 0; i < n; i++) mean[c][i] = ((mean[c][i] - lo) / Math.max(hi - lo, 1e-9)) * 255;
+          }
+        }
+        for (let i = 0; i < n; i++) for (let c = 0; c < 3; c++) rgba[4 * i + c] = Math.round(mean[c][i]);
+        return rgba;
+      },
+    };
+  }
+
+  // Elevation at the centre of every grid cell (same coordinate system as
+  // the image). img/dsm: { left, top, resX, resY } (resY < 0 for north-up);
+  // dsm also { data, width, height, nodata }.
+  function sampleSurface(dsm, img, width, height, W, H) {
+    const spanX = (width * img.resX) / W, spanY = (height * img.resY) / H;
+    const nd = dsm.nodata === null || dsm.nodata === undefined ? null : Number(dsm.nodata);
+    const surface = new Float32Array(W * H);
+    let inside = 0;
+    for (let y = 0; y < H; y++) {
+      const r = Math.floor((img.top + (y + 0.5) * spanY - dsm.top) / dsm.resY);
+      for (let x = 0; x < W; x++) {
+        const c = Math.floor((img.left + (x + 0.5) * spanX - dsm.left) / dsm.resX);
+        let v = NaN;
+        if (r >= 0 && c >= 0 && r < dsm.height && c < dsm.width) {
+          v = dsm.data[r * dsm.width + c];
+          if (!Number.isFinite(v) || (nd !== null && v === nd) || v < -1e5 || v > 1e5) v = NaN;
+        }
+        surface[y * W + x] = v;
+        if (Number.isFinite(v)) inside++;
+      }
+    }
+    return { surface, inside };
+  }
+
   // ------------------------------------------------------------------ main
   async function analyze(input, opts = {}, progress = () => {}) {
     const step = async (text) => { progress(text); await new Promise((r) => setTimeout(r, 0)); };
@@ -1654,9 +1766,16 @@
       },
       field_area_m2: fieldPixels * area,
       canopy_area_m2: canopyPixels * area,
+      grid: { width: w, height: h, pixel },
       valid,
+      mask: opts.returnRasters ? mask : undefined,
+      labels: opts.returnRasters ? labels : undefined,
+      heights: opts.returnRasters && chm ? chm : undefined,
     };
   }
 
-  window.PecanAnalysis = { analyze };
+  window.PecanAnalysis = {
+    analyze, groundPixelSize, gridSize, countField, createGrid, sampleSurface, DETAIL_PIXELS,
+    VERSION: "2026-11-13",
+  };
 })();

@@ -21,8 +21,8 @@ The site runs entirely in the web browser: the images you open are not uploaded 
 | | Drop a drone image (and its DSM) | Drop a results ZIP from the notebook |
 |---|---|---|
 | Input | Orthomosaic GeoTIFF (any projection, 8 or 16 bit), or a JPG / PNG of an orchard; plus, for a GeoTIFF, the elevation (DSM) file of the same flight | `Pecan_Canopy_Results_….zip` from the Kaggle notebook |
-| Where it is analysed | In the browser, in about a minute | On Kaggle (Python), a few minutes per image, at full resolution |
-| Canopy | Colour and texture; with the DSM also tree height (canopy at least 1 m tall), cast shadow trimmed | The same method, at full resolution: most detailed |
+| Where it is analysed | In the browser, in about a minute | On Kaggle, with the same engine (`js/analyze.js`, run with Node.js) |
+| Canopy | Colour and texture; with the DSM also tree height (canopy at least 1 m tall), cast shadow trimmed | Identical: same crowns, same canopy to the m², same diagonals |
 | Then | The same map, totals, thinning plan, checks, corrections and export | The same map, totals, thinning plan, checks, corrections and export |
 
 Drop the orthomosaic and its DSM together (hold <kbd>Ctrl</kbd> to select both), or add the DSM in the window that opens. Without a DSM the canopy comes from the image only and can include some grass. A JPG or PNG has no coordinates, so you enter the ground size of one pixel (in cm). Areas are then in square metres, and exported shapes are in local metres instead of longitude / latitude.
@@ -62,9 +62,9 @@ Undo and redo with <kbd>Ctrl</kbd>+<kbd>Z</kbd> and <kbd>Ctrl</kbd>+<kbd>Y</kbd>
 - **Corrections log (CSV).**
 - **Print / save the map as PDF.**
 
-## The Kaggle notebook (most accurate)
+## The Kaggle notebook (same results)
 
-The dashboard also opens the results ZIP made by the pecan canopy notebook (`notebook/Pecan_Canopy_Only_FIXED.ipynb`, run on Kaggle). The notebook works on **any pecan orchard orthomosaic**:
+The dashboard also opens the results ZIP made by the pecan canopy notebook (`notebook/Pecan_Canopy_Only_FIXED.ipynb`, run on Kaggle). With `ENGINE = "dashboard"` (the default) the notebook runs **this dashboard's own engine** (`js/analyze.js`, embedded in the notebook, run with Node.js), so the same image, DSM and Detail give exactly the same crowns, canopy and diagonals in both places. If Kaggle has no Node.js, the notebook installs it (`nodejs-bin`; switch *Internet* on in the notebook settings). `ENGINE = "python"` runs the older full-resolution Python analysis instead (numbers about 1–2 % different). The notebook works on **any pecan orchard orthomosaic**:
 
 - any file name;
 - lat/long, Web Mercator or a projected CRS;

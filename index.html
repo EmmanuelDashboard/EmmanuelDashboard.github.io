@@ -281,7 +281,7 @@
           </select>
         </label>
       </div>
-      <p class="muted small">The image is analysed on this computer and is not uploaded. It takes about one minute. Same method as the Kaggle notebook; the notebook works at full resolution, so its results ZIP is the most detailed.</p>
+      <p class="muted small">The image is analysed on this computer and is not uploaded. It takes about one minute. The Kaggle notebook runs this same engine: with the same image, DSM and Detail it gives exactly the same results.</p>
       <div class="modal-actions">
         <button class="btn" value="cancel">Cancel</button>
         <button class="btn primary" value="go" id="an-go">Analyse</button>
@@ -294,7 +294,7 @@
       <h2>How to use</h2>
       <ol>
         <li><strong>Open an image.</strong> Drag a drone image of a pecan orchard onto the map (orthomosaic GeoTIFF, JPG or PNG), or click <em>Open image or results</em>. Drop its <strong>elevation (DSM) file</strong> together with it (or add it in the window that opens): tree heights take out grass and weeds and find every treetop. The canopy, crowns, planting grid and EVEN / ODD diagonals are found in your browser; nothing is uploaded. A JPG or PNG has no coordinates, so you enter the ground size of one pixel (no DSM then).</li>
-        <li><strong>Most detailed:</strong> the pecan canopy notebook on Kaggle works at full resolution; drop its <code>Pecan_Canopy_Results_….zip</code> here.</li>
+        <li><strong>Same results on Kaggle:</strong> the pecan canopy notebook runs this dashboard's engine, so the same image and DSM give exactly the same crowns and canopy there; drop its <code>Pecan_Canopy_Results_….zip</code> here to open them.</li>
         <li><strong>Check.</strong> Each crown is tinted in the colour of its diagonal (blue EVEN, red ODD). Along every row the crowns alternate blue, red, blue, also across a missing tree. <em>Quality checks</em> confirms it (0 neighbours with the same colour) and <em>Show</em> takes you to any that are left. The number at the end of each line is the total canopy of that diagonal.</li>
         <li><strong>Decide.</strong> <em>Thinning plan</em>: choose EVEN or ODD to see the trees and canopy removed and left, the canopy cover before and after, and the tree heights. <em>Download trees to remove</em> gives the crew a list with the GPS position of every tree to cut.</li>
         <li><strong>Correct.</strong> Click a crown, then:

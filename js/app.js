@@ -397,15 +397,19 @@
     const rx = Math.abs(res[0]), ry = Math.abs(res[1]);
     const minx = origin[0], maxy = origin[1], miny = maxy - ry * height;
     const pcs = keys.ProjectedCSTypeGeoKey, gcs = keys.GeographicTypeGeoKey;
+    // Raw grid of the image (the shared analysis samples the DSM with it).
+    const raw = { left: origin[0], top: origin[1], resX: res[0], resY: res[1] };
     if (keys.GTModelTypeGeoKey === 2 || (!pcs && gcs)) {
-      const lat0 = ((miny + maxy) / 2) * Math.PI / 180;
-      const mx = 111320 * Math.cos(lat0), my = 110574;
-      return { crs: `EPSG:${gcs || 4326} (latitude / longitude)`, px: rx * mx, py: ry * my, origin: [0, 0], toLonLat: (x, y) => [minx + x / mx, miny + y / my] };
+      const { px, py } = PecanAnalysis.groundPixelSize({ kind: "geographic", rx, ry, miny, maxy });
+      const mx = px / rx, my = py / ry;
+      return { crs: `EPSG:${gcs || 4326} (latitude / longitude)`, px, py, raw, origin: [0, 0], toLonLat: (x, y) => [minx + x / mx, miny + y / my] };
     }
     if ([3857, 3785, 900913, 102100, 102113].includes(pcs)) {
-      const R = 6378137, k = Math.cos(2 * Math.atan(Math.exp((miny + maxy) / 2 / R)) - Math.PI / 2);
+      const R = 6378137;
+      const { px, py } = PecanAnalysis.groundPixelSize({ kind: "webmercator", rx, ry, miny, maxy });
+      const k = px / rx;
       return {
-        crs: "EPSG:3857 (Web Mercator)", px: rx * k, py: ry * k, origin: [0, 0],
+        crs: "EPSG:3857 (Web Mercator)", px, py, raw, origin: [0, 0],
         toLonLat: (x, y) => { const X = minx + x / k, Y = miny + y / k; return [(X / R) * 180 / Math.PI, (2 * Math.atan(Math.exp(Y / R)) - Math.PI / 2) * 180 / Math.PI]; },
       };
     }
@@ -414,8 +418,9 @@
       const f = unit === 9002 ? 0.3048 : unit === 9003 ? 1200 / 3937 : 1;
       const def = UTM_DEF(pcs);
       const p = def ? proj4("EPSG:4326", def) : null;
+      const { px, py } = PecanAnalysis.groundPixelSize({ kind: "projected", rx, ry, miny, maxy, unitFactor: f });
       return {
-        crs: `EPSG:${pcs}`, px: rx * f, py: ry * f,
+        crs: `EPSG:${pcs}`, px, py, raw,
         origin: p ? [minx, miny] : [0, 0],
         toLonLat: p ? (x, y) => p.inverse([minx + x, miny + y]) : null,
       };
@@ -464,6 +469,19 @@
       if (!a || !b) throw new Error(`it uses another coordinate system (EPSG:${dCode}) than the image (EPSG:${rCode}); export both in the same one`);
       const p = proj4(a, b);
       toDsm = (x, y) => p.forward([x, y]);
+    }
+    if (!toDsm) {
+      // Same coordinate system: full-resolution DSM sampled by the shared
+      // code (identical to the notebook).
+      const full = (await image.readRasters({ samples: [0] }))[0];
+      const nodataFull = typeof image.getGDALNoData === "function" ? image.getGDALNoData() : null;
+      const { surface, inside } = PecanAnalysis.sampleSurface(
+        { data: full, width: dW, height: dH, left: dOrig[0], top: dOrig[1], resX: dRes[0], resY: dRes[1], nodata: nodataFull },
+        { left: rOrig[0], top: rOrig[1], resX: rRes[0], resY: rRes[1] },
+        info.width, info.height, W, H,
+      );
+      if (inside < 0.2 * W * H) throw new Error("it does not cover this image (another field?)");
+      return surface;
     }
     // Image-grid pixel centre -> image coordinates.
     const sx = (info.width * rRes[0]) / W, sy = (info.height * rRes[1]) / H;
@@ -594,7 +612,45 @@
     }
   }
 
+  // Field share of a GeoTIFF from its full-resolution alpha band (the same
+  // count as in the notebook), 1 without an alpha band.
+  async function fieldFractionFull(info) {
+    const alpha = alphaIndex(info);
+    if (info.kind !== "tiff" || alpha < 0) return 1;
+    const W = info.width, H = info.height;
+    const rows = Math.max(1, Math.floor(60e6 / W));
+    let inside = 0;
+    for (let r0 = 0; r0 < H; r0 += rows) {
+      const r1 = Math.min(H, r0 + rows);
+      const data = await info.image.readRasters({ samples: [alpha], window: [0, r0, W, r1] });
+      inside += PecanAnalysis.countField(data[0]);
+      setLoading(`Measuring the field … ${Math.round((100 * r1) / H)}%`);
+      await nextFrame();
+    }
+    return inside / (W * H);
+  }
+
+  // GeoTIFF: full-resolution rows averaged onto the W x H analysis grid by
+  // the shared code (identical to the notebook).
+  async function readGrid(info, W, H) {
+    const alpha = alphaIndex(info);
+    const samples = alpha >= 0 ? [0, 1, 2, alpha] : [0, 1, 2];
+    const grid = PecanAnalysis.createGrid(info.width, info.height, W, H, {
+      hasAlpha: alpha >= 0, nodata: info.nodata, bits: info.bits,
+    });
+    const rows = Math.max(1, Math.floor(30e6 / (info.width * samples.length)));
+    for (let r0 = 0; r0 < info.height; r0 += rows) {
+      const r1 = Math.min(info.height, r0 + rows);
+      const data = await info.image.readRasters({ samples, window: [0, r0, info.width, r1] });
+      grid.addRows(r0, r1 - r0, data);
+      setLoading(`Reading the image … ${Math.round((100 * r1) / info.height)}%`);
+      await nextFrame();
+    }
+    return grid.finish();
+  }
+
   async function readPixels(info, W, H) {
+    if (info.kind === "tiff") return readGrid(info, W, H);
     const rgba = new Uint8ClampedArray(W * H * 4);
     if (info.kind === "picture") {
       const canvas = document.createElement("canvas");
@@ -681,12 +737,10 @@
     if (!choice) return;
     const px = info.geo ? info.geo.px : choice.pixel, py = info.geo ? info.geo.py : choice.pixel;
     if (!(px > 0 && py > 0)) throw new Error("Enter the ground size of one pixel.");
-    const native = Math.sqrt(px * py);
     setLoading("Measuring the field …");
     await nextFrame();
-    const budget = Math.min(choice.budget / (await fieldFraction(info)), 16e6);
-    const pixel = Math.max(native, Math.sqrt((info.width * px * info.height * py) / budget), 0.03);
-    const W = Math.max(64, Math.round((info.width * px) / pixel)), H = Math.max(64, Math.round((info.height * py) / pixel));
+    const fraction = info.kind === "tiff" ? await fieldFractionFull(info) : 1;
+    const { W, H, pixel } = PecanAnalysis.gridSize(info.width, info.height, px, py, fraction, choice.budget);
     const t0 = performance.now();
     setLoading("Reading the image …");
     await nextFrame();

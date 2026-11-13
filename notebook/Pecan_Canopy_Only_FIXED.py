@@ -3,6 +3,15 @@
 # Canopy only (no grass/weeds, no soil, no shadow), one crown per planting
 # position, EVEN / ODD diagonals, canopy per diagonal, thinning START.
 #
+# SAME RESULTS AS THE DASHBOARD: with ENGINE = "dashboard" (default) this
+# notebook runs the Emmanuel Dashboard's own analysis engine (js/analyze.js,
+# embedded at the end, run with Node.js). The same image + DSM give exactly
+# the same crowns, canopy (to the m2) and diagonals here and on
+# https://emmanueldashboard.github.io. Kaggle without Node.js: switch
+# Internet on (notebook settings) so it can be installed (nodejs-bin).
+# ENGINE = "python" runs the older full-resolution Python analysis (steps
+# 1-10 below), whose numbers differ from the dashboard by about 1-2 %.
+#
 # INPUT: attach one or more drone orthomosaics (GeoTIFF, RGB) and, if you
 # have them, the matching elevation rasters (DSM/DEM). Every orthomosaic is
 # analysed and gets its own results ZIP; each one uses the elevation raster
@@ -57,6 +66,18 @@ import importlib.util
 import subprocess
 
 # ==================== SETTINGS ====================
+
+# ---------- Engine ----------
+# "dashboard": the analysis engine of the Emmanuel Dashboard website
+#   (https://emmanueldashboard.github.io, js/analyze.js, run here with
+#   Node.js). The results are IDENTICAL to analysing the same image and DSM
+#   in the dashboard (same crowns, same canopy to the m2, same diagonals).
+# "python": the full-resolution Python analysis below (finer crown edges;
+#   its numbers differ from the dashboard by about 1-2 %).
+ENGINE = "dashboard"
+# Detail of the dashboard engine, as in the dashboard's Analyse window:
+# "fast", "standard" (the dashboard's default) or "fine".
+DASHBOARD_DETAIL = "standard"
 
 # Where the drone images are (all sub-folders are searched). On Kaggle:
 # the attached datasets. Elsewhere: the current folder.
@@ -4393,6 +4414,394 @@ def draw_maps(
     return start
 
 
+# ==================== DASHBOARD ENGINE (identical to the website) ====================
+#
+# The image is analysed by the dashboard's own engine (js/analyze.js,
+# embedded at the end of this file) with Node.js. The image and DSM are read
+# here at full resolution and handed over unchanged; the engine averages
+# them onto its analysis grid exactly as the website does. The maps,
+# tables, Excel file, GeoJSON and ZIP are then made from its result.
+
+DASHBOARD_NODE_RUNNER = r"""
+const fs = require("fs");
+const path = require("path");
+globalThis.window = globalThis;
+require(process.argv[2]);
+const P = window.PecanAnalysis;
+const meta = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+function load(file, type) {
+  const buf = fs.readFileSync(file);
+  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  if (type === "uint16") return new Uint16Array(ab);
+  if (type === "float32") return new Float32Array(ab);
+  return new Uint8Array(ab);
+}
+function save(name, arr) {
+  fs.writeFileSync(path.join(meta.out, name), Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength));
+}
+(async () => {
+  const bands = meta.bands.map((b) => load(b.file, b.dtype));
+  const { px, py } = P.groundPixelSize({ kind: meta.kind, rx: meta.rx, ry: meta.ry, miny: meta.miny, maxy: meta.maxy, unitFactor: meta.unitFactor });
+  const fraction = meta.hasAlpha ? P.countField(bands[3]) / (meta.width * meta.height) : 1;
+  const { W, H, pixel } = P.gridSize(meta.width, meta.height, px, py, fraction, meta.budget);
+  console.log("  analysis grid " + W + " x " + H + " at " + (pixel * 100).toFixed(1) + " cm");
+  const grid = P.createGrid(meta.width, meta.height, W, H, { hasAlpha: meta.hasAlpha, nodata: meta.nodata, bits: meta.bits });
+  grid.addRows(0, meta.height, bands);
+  const rgba = grid.finish();
+  bands.length = 0;
+  let surface = null, dsmProblem = "";
+  if (meta.dsm) {
+    const data = load(meta.dsm.file, "float32");
+    const sampled = P.sampleSurface(
+      { data, width: meta.dsm.width, height: meta.dsm.height, left: meta.dsm.left, top: meta.dsm.top, resX: meta.dsm.resX, resY: meta.dsm.resY, nodata: meta.dsm.nodata },
+      meta.img, meta.width, meta.height, W, H);
+    if (sampled.inside < 0.2 * W * H) dsmProblem = "it does not cover this image (another field?)";
+    else surface = sampled.surface;
+  }
+  const result = await P.analyze({ rgba, width: W, height: H, pixel, surface },
+    { designFt: meta.designFt, directionHintDeg: meta.hint, returnRasters: true },
+    (text) => console.log("  " + text));
+  save("mask.bin", result.mask);
+  save("labels.bin", result.labels);
+  if (result.heights) save("heights.bin", result.heights);
+  fs.writeFileSync(path.join(meta.out, "result.json"), JSON.stringify({
+    crowns: result.crowns, diagonals: result.diagonals, settings: result.settings,
+    segmentation: result.segmentation, field_area_m2: result.field_area_m2,
+    canopy_area_m2: result.canopy_area_m2, W, H, pixel, px, py, fraction,
+    dsm_problem: dsmProblem, version: P.VERSION,
+  }));
+})().catch((error) => { console.error((error && error.stack) || error); process.exit(1); });
+"""
+
+
+def dashboard_engine_source():
+    import base64
+    import zlib
+    return zlib.decompress(base64.b64decode("".join(DASHBOARD_ENGINE_B64))).decode("utf-8")
+
+
+def node_command():
+    """How to run Node.js: `node` if installed, else the nodejs-bin package
+    (pip; needs Internet on in the Kaggle notebook settings)."""
+    import os
+    override = os.environ.get("PECAN_NODE")
+    if override:
+        return [override]
+    node = shutil.which("node")
+    if node:
+        return [node]
+    if importlib.util.find_spec("nodejs") is None and INSTALL_MISSING:
+        print("Installing Node.js (nodejs-bin) ...", flush=True)
+        subprocess.call([sys.executable, "-m", "pip", "install", "-q", "nodejs-bin"])
+    if importlib.util.find_spec("nodejs") is not None:
+        return [sys.executable, "-m", "nodejs"]
+    raise RuntimeError(
+        "Node.js is needed for ENGINE = 'dashboard' and could not be installed. "
+        "In Kaggle: Settings (right panel) > Internet: On, then run again. "
+        "Or set ENGINE = 'python'."
+    )
+
+
+def georef_kind(src):
+    """Coordinate kind and unit factor, as the dashboard reads them."""
+    crs = CRS(src.crs)
+    if crs.is_geographic:
+        return "geographic", 1.0
+    if crs.to_epsg() in WEB_MERCATOR:
+        return "webmercator", 1.0
+    factor = float(crs.axis_info[0].unit_conversion_factor or 1.0)
+    if abs(factor - 0.3048) < 1e-9:
+        return "projected", 0.3048
+    if abs(factor - 1200 / 3937) < 1e-9:
+        return "projected", 1200 / 3937
+    return "projected", 1.0
+
+
+def has_alpha_band(path, src):
+    """Alpha band as the dashboard decides it (TIFF ExtraSamples)."""
+    if src.count < 4:
+        return False
+    try:
+        import tifffile
+        with tifffile.TiffFile(str(path)) as tf:
+            tag = tf.pages[0].tags.get("ExtraSamples")
+            extra = [] if tag is None else list(np.atleast_1d(tag.value))
+        return 1 in extra or 2 in extra or (not extra and src.count == 4)
+    except Exception:
+        return src.colorinterp[3] == ColorInterp.alpha or src.count == 4
+
+
+def run_dashboard(tif):
+    """Analyse one orthomosaic with the dashboard engine; returns its folder."""
+    tif = Path(tif)
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    name = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in tif.stem)[:60]
+    out = OUTPUT_ROOT / f"Pecan_Canopy_Results_{name}_{timestamp}"
+    out.mkdir()
+    work = OUTPUT_ROOT / "_engine" / out.name
+    work.mkdir(parents=True, exist_ok=True)
+
+    log(f"Image: {tif}")
+    log("Engine: dashboard (same analysis as https://emmanueldashboard.github.io).")
+    log(f"Output: {out}")
+
+    with rasterio.open(tif) as src:
+        if src.count < 3:
+            raise ValueError(f"{tif.name} has {src.count} band(s): an RGB orthomosaic is needed.")
+        kind, unit_factor = georef_kind(src)
+        t = src.transform
+        alpha = has_alpha_band(tif, src)
+        dtype = "uint16" if src.dtypes[0] in ("uint16", "int16") else "uint8"
+        bands = []
+        for k, b in enumerate([1, 2, 3] + ([4] if alpha else [])):
+            data = src.read(b)
+            file = work / f"band{k}.bin"
+            data.astype("<u2" if dtype == "uint16" else "uint8").tofile(file)
+            bands.append({"file": str(file), "dtype": dtype})
+            del data
+        top, left = t.f, t.c
+        bottom = top + src.height * t.e
+        meta = {
+            "width": src.width, "height": src.height, "bands": bands,
+            "hasAlpha": bool(alpha), "nodata": None if src.nodata is None else float(src.nodata),
+            "bits": 16 if dtype == "uint16" else 8,
+            "kind": kind, "rx": abs(t.a), "ry": abs(t.e), "miny": min(top, bottom), "maxy": max(top, bottom),
+            "unitFactor": unit_factor,
+            "budget": {"fast": 3e6, "standard": 5e6, "fine": 9e6}[DASHBOARD_DETAIL],
+            "designFt": list(DESIGN_SPACING_FT) if DESIGN_SPACING_FT else None,
+            "hint": DIAGONAL_DIRECTION_HINT_DEG,
+            "img": {"left": left, "top": top, "resX": t.a, "resY": t.e},
+            "dsm": None, "out": str(work),
+        }
+
+        # Elevation (DSM): read at full resolution, handed over unchanged.
+        dsm_path = resolve_elevation(src)
+        dsm_note = "no elevation file"
+        if dsm_path is not None:
+            log(f"Elevation raster: {dsm_path}")
+            with rasterio.open(dsm_path) as dem:
+                if CRS(dem.crs) == CRS(src.crs):
+                    values = dem.read(1).astype("float32")
+                    dt = dem.transform
+                    nodata = dem.nodata
+                else:  # other CRS: onto this image's CRS first
+                    dt, w2, h2 = calculate_default_transform(dem.crs, src.crs, dem.width, dem.height, *dem.bounds)
+                    values = np.full((h2, w2), np.nan, dtype="float32")
+                    reproject(rasterio.band(dem, 1), values, dst_transform=dt, dst_crs=src.crs,
+                              dst_nodata=np.nan, resampling=Resampling.nearest)
+                    nodata = None
+                file = work / "dsm.bin"
+                values.astype("<f4").tofile(file)
+                meta["dsm"] = {
+                    "file": str(file), "width": int(values.shape[1]), "height": int(values.shape[0]),
+                    "left": dt.c, "top": dt.f, "resX": dt.a, "resY": dt.e,
+                    "nodata": None if nodata is None else float(nodata),
+                }
+                del values
+
+        engine = work / "analyze.js"
+        engine.write_text(dashboard_engine_source(), encoding="utf-8")
+        runner = work / "run_engine.js"
+        runner.write_text(DASHBOARD_NODE_RUNNER, encoding="utf-8")
+        (work / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+        log("Running the dashboard engine (Node.js) ...")
+        command = node_command() + ["--max-old-space-size=8192", str(runner), str(engine), str(work / "meta.json")]
+        if command[:3] == [sys.executable, "-m", "nodejs"]:
+            command = command[:3] + command[4:]  # nodejs-bin: no V8 flags
+        process = subprocess.run(command, capture_output=True, text=True)
+        for line in (process.stdout or "").splitlines():
+            log(line.strip())
+        if process.returncode:
+            raise RuntimeError("Dashboard engine failed:\n" + (process.stderr or process.stdout)[-3000:])
+        result = json.loads((work / "result.json").read_text(encoding="utf-8"))
+
+        W, H, pixel = result["W"], result["H"], result["pixel"]
+        seg = result["segmentation"]
+        elevation = seg.get("elevation", {})
+        if dsm_path is not None:
+            elevation["path"] = str(dsm_path)
+            if result.get("dsm_problem"):
+                elevation = {"used": False, "path": str(dsm_path), "reason": result["dsm_problem"]}
+                seg["elevation"] = elevation
+        if dsm_path is not None and not elevation.get("used"):
+            log(f"WARNING: {Path(dsm_path).name} not used: {elevation.get('reason')}.")
+        log(
+            f"Analysis grid {W} x {H} at {pixel * 100:.1f} cm; elevation (DSM) "
+            f"{'used' if elevation.get('used') else 'not used'}; cast shadow trimmed "
+            f"{seg.get('cast_shadow', {}).get('shadow_removed_m2', 0):,.0f} m2."
+        )
+
+        # Local metres of the engine (origin lower-left) -> image CRS.
+        sx = (src.width * t.a) / (W * pixel)
+        sy = (src.height * abs(t.e)) / (H * pixel)
+
+        def to_crs(points):
+            return [(left + x * sx, bottom + y * sy) for x, y in points]
+
+        crowns, records = [], []
+        for c in result["crowns"]:
+            polygons = []
+            for poly in c["polys"]:
+                rings = [to_crs(ring) for ring in poly if len(ring) >= 4]
+                if rings:
+                    polygons.append(Polygon(rings[0], rings[1:]))
+            geometry = unary_union([p if p.is_valid else p.buffer(0) for p in polygons])
+            label_id = int(c["id"][1:])
+            crowns.append((label_id, geometry))
+            top_x, top_y = to_crs([c["top"]])[0]
+            family = "ODD" if abs(int(c["diagonal"])) % 2 else "EVEN"
+            centroid = geometry.centroid
+            records.append({
+                "crown_id": c["id"], "label_id": label_id, "status": "DASHBOARD_ENGINE",
+                "area_m2": float(c["area"]), "area_ft2": float(c["area"]) / 0.3048 ** 2,
+                "x": centroid.x, "y": centroid.y, "diagonal": int(c["diagonal"]), "family": family,
+                "top_x": top_x, "top_y": top_y,
+                "planting_block": 1 if c.get("grid_row") is not None else None,
+                "grid_row": c.get("grid_row"), "grid_tree": c.get("grid_tree"),
+                "review_flags": c.get("flags", ""),
+                "height_median_m": c.get("height_median_m"), "height_p90_m": c.get("height_p90_m"),
+                "height_top_m": c.get("height_top_m"), "height_mean_m": c.get("height_mean_m"),
+            })
+
+        guides = []
+        for d in result["diagonals"]:
+            lines = [LineString(to_crs(piece)) for piece in d["pieces"] if len(piece) > 1]
+            geometry = (MultiLineString(lines) if len(lines) > 1 else lines[0] if lines else GeometryCollection())
+            guides.append({
+                "diagonal": int(d["number"]), "family": "ODD" if int(d["number"]) % 2 else "EVEN",
+                "block": 1, "index": None, "geometry": geometry, "tree_sites": 0,
+            })
+        guides.sort(key=lambda g: g["diagonal"])
+        by_number = {g["diagonal"]: g for g in guides}
+
+        df = pd.DataFrame(records)
+        for column in ["planting_block", "grid_row", "grid_tree"]:
+            df[column] = pd.array(df[column], dtype="Int64")
+        df["guide_distance_m"] = [
+            by_number[r.diagonal]["geometry"].distance(Point(r.top_x, r.top_y))
+            if r.diagonal in by_number and not by_number[r.diagonal]["geometry"].is_empty else np.nan
+            for r in df.itertuples()
+        ]
+        order = df.sort_values(["diagonal", "top_y"], ascending=[True, False]).groupby("diagonal").cumcount() + 1
+        df["tree_on_diagonal"] = pd.array(order.reindex(df.index), dtype="Int64")
+        for g in guides:
+            g["tree_sites"] = int((df["diagonal"] == g["diagonal"]).sum())
+        df = df.sort_values("label_id").reset_index(drop=True)
+
+        # Rasters at the engine's resolution.
+        grid_transform = Affine(src.width * t.a / W, 0.0, left, 0.0, src.height * t.e / H, top)
+        profile = {"driver": "GTiff", "width": W, "height": H, "count": 1, "crs": src.crs,
+                   "transform": grid_transform, "compress": "deflate"}
+        mask = np.fromfile(work / "mask.bin", dtype="uint8").reshape(H, W)
+        labels = np.fromfile(work / "labels.bin", dtype="<i4").reshape(H, W)
+        keep = np.isin(labels, df["label_id"].to_numpy())
+        with rasterio.open(out / "canopy_mask.tif", "w", dtype="uint8", nodata=255, **profile) as dst:
+            dst.write(mask, 1)
+        with rasterio.open(out / "candidate_labels.tif", "w", dtype="int32", nodata=0, **profile) as dst:
+            dst.write(np.where(keep, labels, 0).astype("int32"), 1)
+        if (work / "heights.bin").is_file():
+            heights = np.fromfile(work / "heights.bin", dtype="<f4").reshape(H, W)
+            with rasterio.open(out / "canopy_height_model_cm.tif", "w", dtype="int16", nodata=-32768, **profile) as dst:
+                dst.write(np.where(np.isfinite(heights), np.clip(np.round(heights * 100), -32000, 32000), -32768).astype("int16"), 1)
+            del heights
+        del mask, labels, keep
+
+        settings = dict(result["settings"])
+        settings["engine"] = f"dashboard js/analyze.js {result.get('version')}"
+        settings["analysis_pixel_m"] = pixel
+        settings["analysis_grid"] = [W, H]
+
+        df.to_csv(out / "all_candidates.csv", index=False)
+        df.to_csv(out / "raw_candidates.csv", index=False)
+        grouped = (
+            df.groupby(["diagonal", "family"])
+            .agg(candidate_count=("crown_id", "size"), area_m2=("area_m2", "sum"))
+            .reset_index()
+        )
+        base = pd.DataFrame([
+            {"diagonal": g["diagonal"], "family": g["family"], "planting_block": g["block"],
+             "grid_sites_with_tree": g["tree_sites"], "line_length_m": float(g["geometry"].length)}
+            for g in guides
+        ])
+        grouped = base.merge(grouped, how="left", on=["diagonal", "family"])
+        for column in ["candidate_count", "area_m2"]:
+            grouped[column] = pd.to_numeric(grouped[column], errors="coerce").fillna(0)
+        grouped["candidate_count"] = grouped["candidate_count"].astype(int)
+        grouped.to_csv(out / "diagonal_summary.csv", index=False)
+        family_summary = (
+            df.groupby("family").agg(candidate_count=("crown_id", "size"), area_m2=("area_m2", "sum")).reset_index()
+        )
+        family_summary.to_csv(out / "odd_even_summary.csv", index=False)
+
+        log(f"Pecan canopy (final): {result['canopy_area_m2']:,.1f} m2")
+        make_even_odd_report(df, grouped, out)
+
+        export_geojson(out / "crowns_wgs84.geojson", [g for _, g in crowns],
+                       json.loads(df.to_json(orient="records")), src.crs)
+        export_geojson(out / "guides_wgs84.geojson", [g["geometry"] for g in guides],
+                       base.to_dict("records"), src.crs)
+
+        log(
+            f"Planting rule: neighbours in a row with the same colour: "
+            f"{settings.get('row_neighbours_same_colour')} of {settings.get('row_neighbours')}; "
+            f"{settings.get('crowns_moved_across_gap')} crowns moved across a gap."
+        )
+        print("\nODD / EVEN\n" + family_summary.to_string(index=False), flush=True)
+
+        rgb = src.read([1, 2, 3]).transpose(1, 2, 0)
+        if rgb.dtype != np.uint8:
+            rgb = np.clip(rgb / max(float(np.percentile(rgb, 99)), 1.0) * 255, 0, 255).astype(np.uint8)
+        valid = src.dataset_mask() > 0
+        log("Rendering maps, crown annotations and the EVEN START arrow.")
+        save_web_preview(src, rgb, valid, out)
+        start = draw_maps(src, rgb, valid, crowns, df, guides, settings, out)
+        tiles = save_diagonal_tiles(src, rgb, crowns, df, guides, out)
+        if DISPLAY_MAPS and tiles is not None:
+            show_file(tiles)
+
+        save_json(out / "summary.json", {
+            "input": str(tif),
+            "engine": settings["engine"],
+            "image_preparation": [f"analysed on a {W} x {H} grid at {pixel * 100:.1f} cm (dashboard engine, Detail = {DASHBOARD_DETAIL})"],
+            "crs": str(src.crs),
+            "candidate_count": len(df),
+            "candidate_area_m2": float(df["area_m2"].sum()),
+            "field_area_m2": float(result["field_area_m2"]),
+            "canopy_area_m2": float(result["canopy_area_m2"]),
+            "diagonal_settings": settings,
+            "segmentation": seg,
+            "start": start,
+            "checks": "Same engine as the Emmanuel Dashboard: identical results for the same image and DSM.",
+        })
+
+    (out / "READ_ME.txt").write_text(
+        "PECAN CANOPY + EVEN / ODD THINNING DIAGONALS\n"
+        f"Image: {tif.name}\n"
+        "Engine: the Emmanuel Dashboard's analysis (js/analyze.js), run with\n"
+        "Node.js: results are identical to the dashboard for the same image and\n"
+        f"DSM (Detail = {DASHBOARD_DETAIL}; analysis grid {W} x {H} at {pixel * 100:.1f} cm).\n"
+        "Canopy: colour + texture classifier trained on this image; with the\n"
+        "DSM only canopy at least 1 m tall counts as a tree; clear cast shadow\n"
+        "is trimmed from the crown edges. One crown per planting position.\n"
+        "Along every row neighbouring crowns alternate EVEN / ODD (1 blue,\n"
+        "2 red ...), also across a missing tree (flag MOVED_ACROSS_GAP).\n"
+        "Open this ZIP in the dashboard to check, correct and export the\n"
+        "thinning plan (trees to remove with GPS positions).\n",
+        encoding="utf-8",
+    )
+    shutil.rmtree(work, ignore_errors=True)
+
+    if MAKE_ZIP:
+        log("Creating result ZIP.")
+        zip_path = shutil.make_archive(str(out), "zip", root_dir=out.parent, base_dir=out.name)
+        log(f"ZIP: {zip_path}")
+
+    log(f"FINISHED {tif.name}.")
+    return out
+
+
 # ==================== MAIN WORKFLOW ====================
 
 def run(tif):
@@ -5019,18 +5428,22 @@ def run_all():
         + ", ".join(path.name for path in images)
     )
 
+    analyse = run_dashboard if ENGINE == "dashboard" else run
+    log(f"Engine: {ENGINE}.")
+
     if len(images) == 1:
         try:
-            return [run(images[0])]
+            return [analyse(images[0])]
         finally:  # working copies are not results
             shutil.rmtree(OUTPUT_ROOT / "_prepared", ignore_errors=True)
+            shutil.rmtree(OUTPUT_ROOT / "_engine", ignore_errors=True)
 
     done, rows = [], []
 
     for number, tif in enumerate(images, 1):
         log(f"========== {number} of {len(images)}: {tif.name} ==========")
         try:
-            out = run(tif)
+            out = analyse(tif)
             done.append(out)
             summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
             family = pd.read_csv(out / "odd_even_summary.csv").set_index("family")
@@ -5049,12 +5462,355 @@ def run_all():
             rows.append({"image": tif.name, "status": f"failed: {error}"})
         finally:  # working copies are not results
             shutil.rmtree(OUTPUT_ROOT / "_prepared", ignore_errors=True)
+            shutil.rmtree(OUTPUT_ROOT / "_engine", ignore_errors=True)
 
     table = pd.DataFrame(rows)
     table.to_csv(OUTPUT_ROOT / "all_images_summary.csv", index=False)
     print("\nALL IMAGES\n" + table.to_string(index=False), flush=True)
 
     return done
+
+
+# ==================== EMBEDDED DASHBOARD ENGINE ====================
+# js/analyze.js of the Emmanuel Dashboard (zlib + base64), unchanged.
+# ---- BEGIN EMBEDDED DASHBOARD ENGINE ----
+DASHBOARD_ENGINE_B64 = (
+    "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"
+    "Fg2Ap1fXA+wQqq7GHJQAf9oumgGiP4SJ5w5T6SjaGzrgHg4/DTdGnOxQlN0qYgNeUYYpHHWibIEVJu/FUhZWYtRwyvCYqFuw"
+    "EUaqDdNd+OjlmNqOnNzGfI8ptL1BdMgk3rotiaqEJ/Ae5y2/4ZDy6DIrVdmsEzjrHgHW+GF718zSAll+hKXSMj5HEJHAUW+d"
+    "ziQb7kyve/yk8QF3JqNU20JKBb9NtrKMxPbauj0ykMRXKHCSeaQFxdhpizXDenyVkEmnhRm0ekTK0Vf9hRlj7dxgGN0PO5aP"
+    "jjQxIFgwvpqGzCc3cLM1ZtvuMB5HAnbUFCOZe4U/z6SUPkGqfW5vXG5QDVkaToO/4fpyHRRq1TLs8GCLyifgwcmuEpjtNoWG"
+    "eSaOFS/Ytknek0tci17d1IVKZTwKcmw2ckkKm5E+g2ZgRsmeNKObJ1qBl8R9SScvvf55gfmM47E/KCTqpTVqMfLDy0hN1GW0"
+    "X2AwkxCcW9aXrqUzNW6fpz+vYWcHI9RHxcUOhMFsEpCMFuHwUetNdYI0K/FSG42ZR/m2hfHDVvliNwNUwTeGRVrNNiz9DPXj"
+    "sB/gtALCUQbhlnWcyExP4PBt6MjHyQcBFiofIZzyGFAArbmUZbDF8DIY0wcD0ZA3P5SxN9Kv6N+IIuu2a8zS+BPHjePj8sd4"
+    "5fpg4GV6ZWvK7RA4YYyj3kGH4O9o59H5XNFlYowEP/wVLebQuz/euhIyCgx/BC6sVrAuk0mfY6qo80X4eupwZx6XIYCP2B2o"
+    "pLhSV3ixMTAiHX+Z8ZeI14sJ5cJjc986Knmypg2hPzy0La7tLRlLb/Hc3tJl2g7f7rr8CG939LbhEEUiDLz1nJQ7Piqx6iHv"
+    "2C0fcdhuw0HWomlWkw+4yf1OsWOCS6sCpEXqC/zY1Z1e44qQwAQa5z4cb7F8CwEcIe0f7yJPHf6203VUWbue5Y7WaO/Ias8u"
+    "j/UP1ZWATE5f7XrRfg9VOLJWDVN2ZUJQlOTcwOvGFTbpYwfX7L4L2pWzjfhET8hDFWpq00xmzxJ2MxN4Zpr5DVpsFfZkrtQq"
+    "HiQd3Ebw786OMiIGDTjZSWeE6OFykx2/2fGbXb0GBwukUCRmJ1F5ezsjSFIfw8bD222UGcKcdsyDnIdQmyOBq1XPjgONXNA6"
+    "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"
+    "CbiR4+7x03av1+6dPMRP0LvbCFUb/x8c7kmZ"
+)
+# ---- END EMBEDDED DASHBOARD ENGINE ----
 
 
 # ==================== RUN ====================
