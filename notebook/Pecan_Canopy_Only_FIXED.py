@@ -3598,7 +3598,7 @@ def export_geojson(path, geometries, properties, crs):
     )
 
 
-# ==================== MAPS + EVEN START ARROW ====================
+# ==================== MAPS + START ARROW ====================
 
 FAMILY_COLOURS = {
     "EVEN": "#1e9be9",
@@ -4388,10 +4388,11 @@ def draw_maps(
                     f"{start_name} ({start_family}): start, arrow shows direction",
                 )
             )
+            start_count = int(crowns_of.get(start_number, 0))
             totals = (
                 f"{start_name} canopy\n"
                 f"{area_of.get(start_number, 0.0):,.0f} m² · "
-                f"{int(crowns_of.get(start_number, 0))} crowns"
+                f"{start_count} crown{'' if start_count == 1 else 's'}"
             )
 
         legend_below(ax, entries, totals)
@@ -4771,7 +4772,7 @@ def run_dashboard(tif):
         if rgb.dtype != np.uint8:
             rgb = np.clip(rgb / max(float(np.percentile(rgb, 99)), 1.0) * 255, 0, 255).astype(np.uint8)
         valid = src.dataset_mask() > 0
-        log("Rendering maps, crown annotations and the EVEN START arrow.")
+        log("Rendering maps, crown annotations and the START arrow.")
         save_web_preview(src, rgb, valid, out)
         start = draw_maps(src, rgb, valid, crowns, df, guides, settings, out)
         tiles = save_diagonal_tiles(src, rgb, crowns, df, guides, out)
@@ -5282,7 +5283,7 @@ def run(tif):
 
         log(
             "Rendering diagonal maps, retained crown "
-            "annotations and EVEN START arrow."
+            "annotations and START arrow."
         )
 
         save_web_preview(src, rgb, valid, out)
