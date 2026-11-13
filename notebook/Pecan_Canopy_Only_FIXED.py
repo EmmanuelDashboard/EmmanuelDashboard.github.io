@@ -57,7 +57,7 @@
 #  10. Each diagonal is a smooth curve through the treetops on it, so it
 #      crosses the top of every crown on it, also where rows bend.
 #
-# Raw detections are preserved separately. START + arrow follow D02.
+# Raw detections are preserved separately. START + arrow: first diagonal of the family with the smaller canopy (D01 or D02).
 # ============================================================
 
 from pathlib import Path
@@ -198,8 +198,11 @@ MAX_ANNOTATED_CROWNS = MAX_RETAINED_CROWNS
 MAP_DPI = 300
 DISPLAY_MAPS = True
 
-# D02 is EVEN. D01 is ODD.
-START_DIAGONAL = 2
+# Where thinning starts. "auto": the family (EVEN or ODD) with the SMALLER
+# total canopy is removed and thinning starts on its first diagonal (D01
+# when ODD is smaller, D02 when EVEN is smaller), as in the dashboard.
+# Or a diagonal number, e.g. 2 for D02 (EVEN) or 1 for D01 (ODD).
+START_DIAGONAL = "auto"
 
 MAKE_ZIP = True
 INSTALL_MISSING = True
@@ -4038,30 +4041,40 @@ def draw_maps(
 
     colors = FAMILY_COLOURS
 
+    # Thinning removes the family with the smaller total canopy and starts on
+    # its first drawn diagonal (D01 for ODD, D02 for EVEN), as the dashboard.
+    drawn_numbers = sorted(g["diagonal"] for g in guides if guide_parts(g["geometry"]))
+    if str(START_DIAGONAL).lower() == "auto":
+        area_by_family = df.groupby("family")["area_m2"].sum()
+        smaller = (
+            "ODD" if float(area_by_family.get("ODD", 0.0)) <= float(area_by_family.get("EVEN", 0.0))
+            else "EVEN"
+        )
+        start_number = next(
+            (d for d in drawn_numbers if ("ODD" if d % 2 else "EVEN") == smaller),
+            drawn_numbers[0] if drawn_numbers else None,
+        )
+    else:
+        start_number = int(START_DIAGONAL)
+
     requested = next(
-        (
-            guide
-            for guide in guides
-            if guide["diagonal"] == START_DIAGONAL
-        ),
+        (guide for guide in guides if guide["diagonal"] == start_number),
         None,
     )
 
-    if (
-        requested is None
-        or requested["family"] != "EVEN"
-    ):
+    if requested is None:
         raise ValueError(
-            "Choose an existing EVEN diagonal. "
-            "Use START_DIAGONAL = 2 for D02."
+            f"START_DIAGONAL = {START_DIAGONAL}: no such diagonal. "
+            'Use START_DIAGONAL = "auto".'
         )
 
+    start_family = requested["family"]
     segments = guide_parts(requested["geometry"])
 
     if not segments:
         raise ValueError(
-            "Selected EVEN diagonal is empty. "
-            "Choose another even diagonal."
+            f"D{start_number:02d} has no line in the field. "
+            'Use START_DIAGONAL = "auto" or another diagonal.'
         )
 
     # START at the upper end; the arrow follows the wavy diagonal down.
@@ -4087,18 +4100,22 @@ def draw_maps(
         always_xy=True,
     ).transform(x, y)
 
-    start_name = f"D{START_DIAGONAL:02d}"
+    start_name = f"D{start_number:02d}"
 
     start = {
-        "diagonal": START_DIAGONAL,
-        "family": "EVEN",
+        "diagonal": start_number,
+        "family": start_family,
         "pixel_col": col,
         "pixel_row": row,
         "longitude": lon,
         "latitude": lat,
         "arrow_length_m": line_length,
+        "rule": (
+            "family with the smaller total canopy, its first diagonal"
+            if str(START_DIAGONAL).lower() == "auto" else "START_DIAGONAL setting"
+        ),
         "note": (
-            f"Thinning starts at the upper end of {start_name} (EVEN); the "
+            f"Thinning starts at the upper end of {start_name} ({start_family}); the "
             "arrow follows its wavy line through every crown on it."
         ),
     }
@@ -4116,7 +4133,7 @@ def draw_maps(
     )
 
     log(
-        f"START: {start_name}, EVEN | "
+        f"START: {start_name}, {start_family} ({start['rule']}) | "
         f"arrow along the wavy line: {line_length:.2f} m"
     )
 
@@ -4227,7 +4244,7 @@ def draw_maps(
         ("odd", "ODD diagonals"),
         ("even", "EVEN diagonals"),
         ("crowns", "EVEN and ODD crowns"),
-        ("final_thinning_start", f"Thinning start: {start_name} (EVEN)"),
+        ("final_thinning_start", f"Thinning start: {start_name} ({start_family})"),
     ]
 
     for mode, title in modes:
@@ -4343,10 +4360,10 @@ def draw_maps(
 
         # Final thinning map: ONLY the START diagonal, with its arrow.
         if mode == "final_thinning_start":
-            draw_start_arrow(ax, src, start_pieces, colors["EVEN"])
+            draw_start_arrow(ax, src, start_pieces, colors[start_family])
 
             ax.annotate(
-                f"START\n{start_name} (EVEN)",
+                f"START\n{start_name} ({start_family})",
                 xy=tuple(start_pieces[0][0]),
                 xytext=(-16, 10),
                 textcoords="offset points",
@@ -4366,15 +4383,15 @@ def draw_maps(
 
             entries.append(
                 (
-                    Line2D([0], [0], color=colors["EVEN"], lw=3.0,
+                    Line2D([0], [0], color=colors[start_family], lw=3.0,
                            marker=">", markersize=10),
-                    f"{start_name} (EVEN): start, arrow shows direction",
+                    f"{start_name} ({start_family}): start, arrow shows direction",
                 )
             )
             totals = (
                 f"{start_name} canopy\n"
-                f"{area_of.get(START_DIAGONAL, 0.0):,.0f} m² · "
-                f"{int(crowns_of.get(START_DIAGONAL, 0))} crowns"
+                f"{area_of.get(start_number, 0.0):,.0f} m² · "
+                f"{int(crowns_of.get(start_number, 0))} crowns"
             )
 
         legend_below(ax, entries, totals)
@@ -5372,7 +5389,7 @@ def run(tif):
         "  upper (START) end.\n"
         "guides_wgs84.geojson: the wavy diagonals (D01 = outermost on the\n"
         "  east/south-east side; numbering continues block by block).\n"
-        "final_thinning_start_map.png: the START diagonal (D02) only, with\n"
+        "final_thinning_start_map.png: the START diagonal only (first line of\n"
         "  its arrow (direction of travel).\n"
         "diagonal_check_tiles.png: 60 m zoom; each crown tinted in the\n"
         "  colour of its diagonal, white borders between crowns.\n"
@@ -5394,7 +5411,7 @@ def run(tif):
         "Combined retained EVEN + ODD candidates do not exceed MAX_RETAINED_CROWNS.\n"
         "raw_candidates.csv preserves every raw detection.\n"
         "excluded_candidates.csv records every exclusion and reason.\n"
-        "START is D02, an EVEN diagonal; the arrow follows its wavy line.\n"
+        "START: first diagonal of the family (EVEN or ODD) with the smaller\n"
         "Crown boundaries and diagonals still deserve a visual check.\n"
     )
 

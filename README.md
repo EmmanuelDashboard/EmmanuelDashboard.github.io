@@ -39,7 +39,7 @@ Drop the orthomosaic and its DSM together (hold <kbd>Ctrl</kbd> to select both),
 - **The wavy thinning diagonals.** Each one runs from its first tree to its last tree and ends in an arrow.
 - **The canopy total (m²) of each diagonal**, written at the end of its line (zoom in to read it), plus a table and a chart.
 - **EVEN, ODD and overall totals**: canopy area, crowns and diagonals.
-- **Where to start.** The start diagonal (D02 by default, always an EVEN diagonal) is drawn thick with a START label and an arrow for the direction of travel. *Start only* hides the other lines.
+- **Where to start.** Thinning removes the family (EVEN or ODD) with the smaller total canopy and starts on its first diagonal: D01 when ODD is smaller, D02 when EVEN is smaller. The start line is drawn thick with a START label and an arrow for the direction of travel; you can pick another one, and the thinning plan follows it. *Start only* hides the other lines.
 
 ## Corrections
 

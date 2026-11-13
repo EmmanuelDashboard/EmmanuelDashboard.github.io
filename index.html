@@ -100,7 +100,7 @@
       <section class="card" id="card-start" hidden>
         <div class="card-head"><h2>Where to start</h2></div>
         <label class="field">
-          <span>Start diagonal (EVEN)</span>
+          <span>Start diagonal (default: first line of the family with the smaller canopy)</span>
           <select id="start-select"></select>
         </label>
         <p class="start-facts" id="start-facts"></p>
@@ -305,7 +305,7 @@
             <li><em>Add missed crown</em>: click around the crown on the map, double-click to finish.</li>
           </ul>
           <kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes, <kbd>Esc</kbd> cancels. Corrections are kept in this browser until you reset them.</li>
-        <li><strong>Where to start.</strong> Choose the EVEN diagonal to remove first (D02 by default). <em>Start only</em> shows just that line.</li>
+        <li><strong>Where to start.</strong> Thinning removes the family (EVEN or ODD) with the smaller total canopy and starts on its first line: D01 when ODD is smaller, D02 when EVEN is smaller. You can choose another line; the thinning plan follows it. <em>Start only</em> shows just that line.</li>
         <li><strong>Export</strong> the corrected crowns and the canopy per diagonal (EVEN and ODD totals at the end).</li>
       </ol>
       <div class="modal-actions"><button class="btn primary" value="close">Got it</button></div>

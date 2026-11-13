@@ -1024,10 +1024,11 @@
     $("layer-image").disabled = !preview;
     $("layer-image").parentElement.title = preview ? "" : noPreviewNote;
 
-    // Start.
-    const evens = [...state.diagonals.values()].filter((d) => d.family === "EVEN" && d.pieces.length).map((d) => d.number).sort((a, b) => a - b);
-    const suggested = state.summary && state.summary.start && Number(state.summary.start.diagonal);
-    state.start = evens.includes(suggested) ? suggested : evens.includes(2) ? 2 : evens[0] ?? null;
+    // Start: thinning removes the family (EVEN or ODD) with the smaller total
+    // canopy and starts on its first diagonal (D01 for ODD, D02 for EVEN).
+    const candidates = [...state.diagonals.values()].filter((d) => d.pieces.length).map((d) => d.number).sort((a, b) => a - b);
+    state.defaultStart = ruleStart(candidates);
+    state.start = state.defaultStart;
 
     // Key for saved corrections.
     let total = 0;
@@ -1048,7 +1049,7 @@
     state.fitZoom = map.getZoom();
 
     const saved = storageGet(state.key);
-    if (saved && Number.isFinite(saved.start) && evens.includes(saved.start)) state.start = saved.start;
+    if (saved && Number.isFinite(saved.start) && candidates.includes(saved.start)) state.start = saved.start;
     let restored = 0;
     if (saved && Array.isArray(saved.edits) && saved.edits.length) {
       for (const edit of saved.edits) {
@@ -1057,7 +1058,8 @@
     }
 
     fillFieldCard();
-    fillStartSelect(evens);
+    fillStartSelect(candidates);
+    if (state.start !== null) $("plan-family").value = family(state.start);
     drawStart();
     refreshAll();
     initChart();
@@ -1261,18 +1263,18 @@
     for (const piece of d.pieces) {
       const ll = piece.map(toLL);
       L.polyline(ll, { renderer: renderers.start, pane: "start", color: "#ffffff", weight: 9, opacity: 0.95, interactive: false }).addTo(layers.start);
-      L.polyline(ll, { renderer: renderers.start, pane: "start", color: LINE_COLORS.EVEN, weight: 5, opacity: 1, interactive: false }).addTo(layers.start);
+      L.polyline(ll, { renderer: renderers.start, pane: "start", color: LINE_COLORS[d.family], weight: 5, opacity: 1, interactive: false }).addTo(layers.start);
     }
     state.startArrow = null;
     if (d.end) {
-      state.startArrow = L.polygon(arrowHead(d.end, 9, 4.5), { renderer: renderers.start, pane: "start", color: "#ffffff", weight: 2, fillColor: LINE_COLORS.EVEN, fillOpacity: 1, interactive: false });
+      state.startArrow = L.polygon(arrowHead(d.end, 9, 4.5), { renderer: renderers.start, pane: "start", color: "#ffffff", weight: 2, fillColor: LINE_COLORS[d.family], fillOpacity: 1, interactive: false });
       state.startArrow.addTo(layers.start);
       if (state.loaded) styleLinesForZoom();
     }
     const top = diagonalTop(d);
     if (top) {
       L.marker(toLL(top), {
-        icon: L.divIcon({ className: "start-label", html: `<span>START<br>${dname(d.number)} (EVEN)</span>`, iconSize: [0, 0] }),
+        icon: L.divIcon({ className: "start-label", html: `<span>START<br>${dname(d.number)} (${d.family})</span>`, iconSize: [0, 0] }),
         interactive: false,
         keyboard: false,
         zIndexOffset: 1000,
@@ -1407,10 +1409,10 @@
     }
     facts.push(["Diagonals to remove", String(rem.diagonals)]);
     $("plan-facts").innerHTML = facts.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join("");
-    const firstOdd = [...state.diagonals.values()].filter((d) => d.family === "ODD" && d.pieces.length).map((d) => d.number).sort((a, b) => a - b)[0];
-    $("plan-note").textContent = fam === "EVEN"
-      ? `Every blue (EVEN) tree is removed, every red (ODD) tree stays. Start on ${state.start !== null ? dname(state.start) : "the START line"} and follow the arrows. Compare: removing ODD instead takes ${fmtArea(keep.area)} (${fmtInt(keep.count)} trees).`
-      : `Every red (ODD) tree is removed, every blue (EVEN) tree stays. Start on ${firstOdd !== undefined ? dname(firstOdd) : "the first ODD line"} and follow the arrows. Compare: removing EVEN instead takes ${fmtArea(keep.area)} (${fmtInt(keep.count)} trees).`;
+    const startHere = state.start !== null && family(state.start) === fam ? state.start : firstOf(fam);
+    const colour = (f) => (f === "EVEN" ? "blue" : "red");
+    const smaller = rem.area <= keep.area ? "the smaller canopy" : "the larger canopy";
+    $("plan-note").textContent = `Every ${colour(fam)} (${fam}) tree is removed (${smaller}), every ${colour(other)} (${other}) tree stays. Start on ${startHere !== undefined ? dname(startHere) : "the START line"} and follow the arrows. Compare: removing ${other} instead takes ${fmtArea(keep.area)} (${fmtInt(keep.count)} trees).`;
   }
 
   // Neighbouring crowns in a row with the same colour (after corrections).
@@ -1524,9 +1526,9 @@
     return s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
   }
 
-  function fillStartSelect(evens) {
+  function fillStartSelect(candidates) {
     const sel = $("start-select");
-    sel.innerHTML = evens.map((d) => `<option value="${d}">${dname(d)}</option>`).join("");
+    sel.innerHTML = candidates.map((d) => `<option value="${d}">${dname(d)} · ${family(d)}${d === state.defaultStart ? " (smaller canopy)" : ""}</option>`).join("");
     if (state.start !== null) sel.value = String(state.start);
   }
 
@@ -1534,8 +1536,8 @@
     const d = state.diagonals.get(state.start);
     const t = state.totals && state.totals.per.get(state.start);
     $("start-facts").innerHTML = d
-      ? `<strong>${dname(d.number)}</strong> (EVEN) · ${t ? fmtInt(t.count) : 0} crowns · <strong>${fmtArea(t ? t.area : 0)}</strong> canopy · line ${fmtInt(d.length)} m. The arrow shows the direction of travel.`
-      : "No EVEN diagonal found.";
+      ? `<strong>${dname(d.number)}</strong> (${d.family}) · ${t ? fmtInt(t.count) : 0} crown${t && t.count === 1 ? "" : "s"} · <strong>${fmtArea(t ? t.area : 0)}</strong> canopy · line ${fmtInt(d.length)} m. The arrow shows the direction of travel.`
+      : "No diagonal found.";
   }
 
   function fillTable() {
@@ -1598,7 +1600,7 @@
         ["Canopy", fmtArea(t.area)],
         ["Line length", fmtInt(d.length) + " m"],
       ].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
-      $("seld-start").hidden = d.family !== "EVEN";
+      $("seld-start").hidden = !d.pieces.length;
       $("seld-start").disabled = d.number === state.start;
       $("seld-start").textContent = d.number === state.start ? "This is the start" : "Start here";
     }
@@ -1936,8 +1938,22 @@
   }
 
   function defaultStart() {
-    const s = state.summary && state.summary.start && Number(state.summary.start.diagonal);
-    return Number.isFinite(s) ? s : 2;
+    return state.defaultStart ?? null;
+  }
+
+  // First diagonal of the family with the smaller total canopy (model crowns).
+  function ruleStart(candidates) {
+    const area = { EVEN: 0, ODD: 0 };
+    for (const c of state.crowns.values()) if (!c.removed && !c.excluded) area[family(c.diagonal)] += c.area;
+    const fam = area.ODD <= area.EVEN ? "ODD" : "EVEN";
+    const first = (f) => candidates.find((d) => family(d) === f);
+    const pick = first(fam);
+    return pick !== undefined ? pick : candidates[0] ?? null;
+  }
+
+  // First drawn diagonal of a family.
+  function firstOf(fam) {
+    return [...state.diagonals.values()].filter((d) => d.family === fam && d.pieces.length).map((d) => d.number).sort((a, b) => a - b)[0];
   }
 
   function commit(edit) {
@@ -2088,7 +2104,7 @@
   function exportLog() {
     const lines = [csvRow(["n", "correction", "crown", "details"])];
     state.history.forEach((e, i) => lines.push(csvRow([i + 1, e.t, e.id || e.keep || "", describe(e)])));
-    lines.push(csvRow(["", "start", "", `Thinning starts on ${dname(state.start)} (EVEN)`]));
+    lines.push(csvRow(["", "start", "", `Thinning starts on ${dname(state.start)} (${family(state.start)})`]));
     download(fileBase() + "_corrections_log.csv", lines.join("\n") + "\n");
   }
 
@@ -2139,7 +2155,12 @@
     for (const id of ["layer-image", "layer-crowns", "layer-even", "layer-odd", "layer-labels"]) $(id).addEventListener("change", applyLineVisibility);
     $("fill-opacity").addEventListener("input", (e) => { state.fillOpacity = +e.target.value; restyleCrowns(); });
 
-    $("plan-family").addEventListener("change", fillPlan);
+    // Plan and start go together: removing a family starts on its first line.
+    $("plan-family").addEventListener("change", (e) => {
+      const first = firstOf(e.target.value);
+      if (first !== undefined && family(state.start) !== e.target.value) setStart(first);
+      else fillPlan();
+    });
     $("btn-plan-export").addEventListener("click", exportPlan);
     $("checks-list").addEventListener("click", (e) => {
       if (e.target.dataset && e.target.dataset.check === "Show") showNextConflict();
@@ -2227,14 +2248,16 @@
   }
 
   function setStart(number) {
-    if (!state.diagonals.has(number) || family(number) !== "EVEN") return;
+    const d = state.diagonals.get(number);
+    if (!d || !d.pieces.length) return;
     state.start = number;
     $("start-select").value = String(number);
+    $("plan-family").value = family(number);
     drawStart();
     restyleCrowns();
     persist();
     refreshAll();
-    toast(`Thinning starts on ${dname(number)} (EVEN).`);
+    toast(`Thinning starts on ${dname(number)} (${family(number)}).`);
   }
 
   // ------------------------------------------------------------------ start
