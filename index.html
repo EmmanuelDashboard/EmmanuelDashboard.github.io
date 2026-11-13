@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Emmanuel Dashboard for Pecan Thinning</title>
+  <meta name="description" content="Drop a drone image of a pecan orchard to find its canopy, crowns, EVEN / ODD thinning diagonals, canopy per diagonal and where thinning starts; correct and export.">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="Emmanuel Dashboard for Pecan Thinning home"><svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#ba0c2f"/><circle cx="20" cy="22" r="8" fill="#9fd4f7"/><circle cx="44" cy="22" r="8" fill="#ffb3ac"/><circle cx="20" cy="44" r="8" fill="#ffb3ac"/><circle cx="44" cy="44" r="8" fill="#9fd4f7"/><path d="M10 54 54 10" stroke="#fff" stroke-width="4" stroke-linecap="round"/></svg></a>
+    <div class="title-block">
+      <h1>Emmanuel Dashboard for Pecan Thinning</h1>
+      <p>Canopy segmentation · EVEN / ODD diagonals · where to start</p>
+    </div>
+    <div class="top-actions">
+      <button class="btn primary" id="btn-open" type="button">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12m0-12 4.5 4.5M12 3 7.5 7.5M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg>
+        Open image or results
+      </button>
+      <div class="menu-wrap">
+        <button class="btn" id="btn-export" type="button" aria-haspopup="true" aria-expanded="false" disabled>
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 21V9m0 12-4.5-4.5M12 21l4.5-4.5M4 9V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4"/></svg>
+          Export
+        </button>
+        <div class="menu" id="export-menu" role="menu" hidden>
+          <button type="button" role="menuitem" data-export="diagonals">Canopy per diagonal (CSV, totals at the end)</button>
+          <button type="button" role="menuitem" data-export="crowns-csv">Crowns table (CSV)</button>
+          <button type="button" role="menuitem" data-export="crowns-geojson">Corrected crowns (GeoJSON)</button>
+          <button type="button" role="menuitem" data-export="log">Corrections log (CSV)</button>
+          <button type="button" role="menuitem" data-export="print">Print / save map as PDF</button>
+        </div>
+      </div>
+      <button class="btn ghost" id="btn-help" type="button" aria-label="Help">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.2a2.5 2.5 0 1 1 3.6 2.3c-.8.4-1.2 1-1.2 1.8v.4M12 17h.01"/></svg>
+        Help
+      </button>
+    </div>
+    <input id="file-input" type="file" accept=".tif,.tiff,.jpg,.jpeg,.png,.webp,.zip,.geojson,.json,.csv" multiple hidden>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar" id="sidebar" aria-label="Controls">
+      <section class="card" id="card-field" hidden>
+        <div class="card-head">
+          <h2>Field</h2>
+          <span class="muted small" id="field-name"></span>
+        </div>
+        <dl class="facts" id="field-facts"></dl>
+      </section>
+
+      <section class="card" id="card-totals" hidden>
+        <div class="card-head"><h2>Total canopy</h2><span class="badge" id="edit-badge" hidden></span></div>
+        <div class="totals">
+          <div class="total even">
+            <span class="label">EVEN</span>
+            <strong id="t-even-area">–</strong>
+            <span class="sub" id="t-even-sub">–</span>
+          </div>
+          <div class="total odd">
+            <span class="label">ODD</span>
+            <strong id="t-odd-area">–</strong>
+            <span class="sub" id="t-odd-sub">–</span>
+          </div>
+        </div>
+        <div class="total-all">
+          <span>All</span>
+          <strong id="t-all-area">–</strong>
+          <span class="muted" id="t-all-sub">–</span>
+        </div>
+        <p class="muted small" id="t-excluded" hidden></p>
+      </section>
+
+      <section class="card" id="card-start" hidden>
+        <div class="card-head"><h2>Where to start</h2></div>
+        <label class="field">
+          <span>Start diagonal (EVEN)</span>
+          <select id="start-select"></select>
+        </label>
+        <p class="start-facts" id="start-facts"></p>
+        <div class="row">
+          <button class="btn small" id="btn-zoom-start" type="button">Zoom to start</button>
+          <label class="switch"><input type="checkbox" id="toggle-start-only"><span>Start only</span></label>
+        </div>
+      </section>
+
+      <section class="card" id="card-layers" hidden>
+        <div class="card-head"><h2>Layers</h2></div>
+        <div class="toggles">
+          <label class="switch"><input type="checkbox" id="layer-image" checked><span>Drone image</span></label>
+          <label class="switch"><input type="checkbox" id="layer-crowns" checked><span>Crowns</span></label>
+          <label class="switch"><input type="checkbox" id="layer-even" checked><span>EVEN lines</span></label>
+          <label class="switch"><input type="checkbox" id="layer-odd" checked><span>ODD lines</span></label>
+          <label class="switch"><input type="checkbox" id="layer-labels" checked><span>Canopy m² at line ends</span></label>
+        </div>
+        <label class="field slim">
+          <span>Crown fill</span>
+          <input type="range" id="fill-opacity" min="0" max="0.9" step="0.05" value="0.42">
+        </label>
+      </section>
+
+      <section class="card" id="card-edit" hidden>
+        <div class="card-head">
+          <h2>Corrections</h2>
+          <div class="row tight">
+            <button class="icon-btn" id="btn-undo" type="button" aria-label="Undo" title="Undo (Ctrl+Z)" disabled>
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/></svg>
+            </button>
+            <button class="icon-btn" id="btn-redo" type="button" aria-label="Redo" title="Redo (Ctrl+Y)" disabled>
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m15 14 5-5-5-5"/><path d="M20 9H9a5 5 0 0 0 0 10h3"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="modes" role="group" aria-label="Map tool">
+          <button class="mode active" type="button" data-mode="select">Select</button>
+          <button class="mode" type="button" data-mode="draw">Add missed crown</button>
+        </div>
+        <p class="hint" id="mode-hint">Click a crown or a line on the map.</p>
+
+        <div class="selected" id="selected-crown" hidden>
+          <div class="sel-head">
+            <strong id="sel-id"></strong>
+            <span class="chip" id="sel-family"></span>
+          </div>
+          <dl class="facts compact" id="sel-facts"></dl>
+          <div class="move">
+            <span class="muted small">Diagonal</span>
+            <button class="icon-btn" id="sel-prev" type="button" aria-label="Move to previous diagonal">‹</button>
+            <select id="sel-diagonal" aria-label="Diagonal of this crown"></select>
+            <button class="icon-btn" id="sel-next" type="button" aria-label="Move to next diagonal">›</button>
+          </div>
+          <div class="row wrap">
+            <button class="btn small" id="sel-exclude" type="button">Not a pecan</button>
+            <button class="btn small" id="sel-merge" type="button">Merge with…</button>
+            <button class="btn small danger" id="sel-delete" type="button" hidden>Delete added crown</button>
+            <button class="btn small ghost" id="sel-zoom" type="button">Zoom</button>
+          </div>
+        </div>
+
+        <div class="selected" id="selected-diagonal" hidden>
+          <div class="sel-head">
+            <strong id="seld-id"></strong>
+            <span class="chip" id="seld-family"></span>
+          </div>
+          <dl class="facts compact" id="seld-facts"></dl>
+          <div class="row wrap">
+            <button class="btn small" id="seld-start" type="button">Start here</button>
+            <button class="btn small ghost" id="seld-zoom" type="button">Zoom</button>
+          </div>
+        </div>
+
+        <div class="row spread">
+          <span class="muted small" id="edit-count">No corrections yet.</span>
+          <button class="btn small ghost danger" id="btn-reset" type="button" disabled>Reset all</button>
+        </div>
+      </section>
+
+      <section class="card" id="card-diagonals" hidden>
+        <div class="card-head">
+          <h2>Canopy per diagonal</h2>
+          <input class="search" id="search" type="search" placeholder="Find D35 or C01234" aria-label="Find a diagonal or crown">
+        </div>
+        <div class="table-wrap">
+          <table class="diag-table" id="diag-table">
+            <thead><tr><th scope="col">Diagonal</th><th scope="col">Crowns</th><th scope="col">Canopy m²</th></tr></thead>
+            <tbody></tbody>
+            <tfoot></tfoot>
+          </table>
+        </div>
+      </section>
+
+      <footer class="side-foot">
+        <p>Your files stay on your computer: nothing is uploaded.</p>
+        <p><a href="#" id="link-about">About this dashboard</a></p>
+      </footer>
+    </aside>
+
+    <section class="workspace">
+      <div class="map-wrap">
+        <div id="map" aria-label="Map of crowns and diagonals"></div>
+
+        <div class="dropzone" id="dropzone">
+          <div class="drop-inner">
+            <svg class="drop-icon" aria-hidden="true" viewBox="0 0 48 48"><path d="M24 30V8m0 0-8 8m8-8 8 8"/><path d="M8 30v6a4 4 0 0 0 4 4h24a4 4 0 0 0 4-4v-6"/></svg>
+            <h2>Drop a drone image of a pecan orchard</h2>
+            <p>Orthomosaic GeoTIFF, JPG or PNG: it is analysed right here. Or drop a results ZIP from the notebook.</p>
+            <button class="btn primary" id="btn-open-2" type="button">Choose file</button>
+            <ol class="steps">
+              <li><strong>Drop the image.</strong> The canopy (no grass, soil or shadow), the crowns, the planting grid and the EVEN / ODD diagonals are found automatically.</li>
+              <li><strong>Check and correct</strong> the crowns, and pick where thinning starts.</li>
+              <li><strong>Export</strong> the canopy per diagonal and the corrected crowns.</li>
+            </ol>
+            <p class="muted small">Your files stay on your computer: nothing is uploaded. For the most accurate crowns with the elevation (DSM) file, run the Kaggle notebook and drop its results ZIP here.</p>
+          </div>
+        </div>
+
+        <div class="drag-overlay" id="drag-overlay" hidden><span>Drop to open</span></div>
+        <div class="loading" id="loading" hidden><div class="spinner"></div><span id="loading-text">Opening…</span></div>
+        <div class="map-note" id="map-note" hidden></div>
+      </div>
+
+      <section class="chart-panel" id="chart-panel" hidden>
+        <div class="chart-head">
+          <h2>Canopy per diagonal</h2>
+          <div class="legend-inline">
+            <span><i class="sw even"></i>EVEN</span>
+            <span><i class="sw odd"></i>ODD</span>
+          </div>
+          <span class="chart-totals" id="chart-totals"></span>
+        </div>
+        <div class="chart-box"><canvas id="chart" aria-label="Bar chart of canopy area per diagonal"></canvas></div>
+      </section>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <dialog class="modal" id="analyse-modal">
+    <form method="dialog" class="modal-body">
+      <h2>Analyse a drone image</h2>
+      <p class="muted" id="an-file"></p>
+      <dl class="facts" id="an-facts"></dl>
+      <div class="an-fields">
+        <label class="field" id="an-pixel-row" hidden>
+          <span>Ground size of one pixel (cm). This image has no coordinates, so areas depend on it.</span>
+          <input type="number" id="an-pixel" min="0.5" max="200" step="0.1" value="5">
+        </label>
+        <label class="field">
+          <span>Planting design (between trees in the row × between rows)</span>
+          <select id="an-design">
+            <option value="20,40">20 × 40 ft</option>
+            <option value="30,30">30 × 30 ft</option>
+            <option value="35,35">35 × 35 ft</option>
+            <option value="40,40">40 × 40 ft</option>
+            <option value="30,60">30 × 60 ft</option>
+            <option value="60,60">60 × 60 ft</option>
+            <option value="auto">Not sure: measure it from the trees</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Detail</span>
+          <select id="an-detail">
+            <option value="3">Fast (coarser crown outlines)</option>
+            <option value="5" selected>Standard</option>
+            <option value="9">Fine (slower; needs a strong computer)</option>
+          </select>
+        </label>
+      </div>
+      <p class="muted small">The image is analysed on this computer and is not uploaded. It takes about one minute. For the most accurate crowns, with the elevation (DSM) file, run the Kaggle notebook and drop its results ZIP here.</p>
+      <div class="modal-actions">
+        <button class="btn" value="cancel">Cancel</button>
+        <button class="btn primary" value="go" id="an-go">Analyse</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="modal" id="help-modal">
+    <form method="dialog" class="modal-body">
+      <h2>How to use</h2>
+      <ol>
+        <li><strong>Open an image.</strong> Drag a drone image of a pecan orchard onto the map (orthomosaic GeoTIFF, JPG or PNG), or click <em>Open image or results</em>. The canopy, crowns, planting grid and EVEN / ODD diagonals are found in your browser; nothing is uploaded. A JPG or PNG has no coordinates, so you enter the ground size of one pixel.</li>
+        <li><strong>Most accurate:</strong> run the pecan canopy notebook on Kaggle with the orthomosaic <em>and</em> its elevation (DSM) file, then drop its <code>Pecan_Canopy_Results_….zip</code> here.</li>
+        <li><strong>Check.</strong> Each crown is tinted in the colour of its diagonal (blue EVEN, red ODD). Along every row the crowns alternate blue, red, blue. The number at the end of each line is the total canopy of that diagonal.</li>
+        <li><strong>Correct.</strong> Click a crown, then:
+          <ul>
+            <li><em>‹ ›</em> moves it to the neighbouring diagonal (its colour changes);</li>
+            <li><em>Not a pecan</em> takes it out of the totals;</li>
+            <li><em>Merge with…</em> then click a second crown: two pieces of one tree become one crown;</li>
+            <li><em>Add missed crown</em>: click around the crown on the map, double-click to finish.</li>
+          </ul>
+          <kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes, <kbd>Esc</kbd> cancels. Corrections are kept in this browser until you reset them.</li>
+        <li><strong>Where to start.</strong> Choose the EVEN diagonal to remove first (D02 by default). <em>Start only</em> shows just that line.</li>
+        <li><strong>Export</strong> the corrected crowns and the canopy per diagonal (EVEN and ODD totals at the end).</li>
+      </ol>
+      <div class="modal-actions"><button class="btn primary" value="close">Got it</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal" id="about-modal">
+    <form method="dialog" class="modal-body">
+      <h2>About</h2>
+      <p>Emmanuel Dashboard for Pecan Thinning finds, in a drone image of a pecan orchard, the pecan canopy only (no grass, weeds, soil or shadow), one crown per planting position, and the EVEN / ODD thinning diagonals measured from the trees. It also opens the results of the pecan canopy notebook. Diagonal thinning removes alternate trees in each row and column, so every crown belongs to exactly one diagonal.</p>
+      <p>Areas come from the segmentation in the notebook (projected coordinates, square metres). Added crowns are measured here, without the parts that other crowns already cover.</p>
+      <p class="muted small">Built with Leaflet, Chart.js, JSZip, proj4js and polygon-clipping.</p>
+      <div class="modal-actions"><button class="btn primary" value="close">Close</button></div>
+    </form>
+  </dialog>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/proj4@2.11.0/dist/proj4.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/polygon-clipping@0.15.7/dist/polygon-clipping.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/geotiff@2.1.3/dist-browser/geotiff.js"></script>
+  <script src="js/analyze.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
