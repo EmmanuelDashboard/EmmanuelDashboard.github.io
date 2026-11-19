@@ -1,0 +1,67 @@
+:root {
+  --bg: #f6f8fa; --panel: #ffffff; --ink: #1d2328; --muted: #5b6670; --line: #dde3e8;
+  --accent: #0072B2; --accent-soft: rgba(0, 114, 178, .08); --ok: #1f7a4d; --on-accent: #ffffff;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111518; --panel: #1a2026; --ink: #e5eaee; --muted: #9aa6b1; --line: #2c353d;
+    --accent: #56B4E9; --accent-soft: rgba(86, 180, 233, .12); --ok: #5cc28f; --on-accent: #0b1a24;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111518; --panel: #1a2026; --ink: #e5eaee; --muted: #9aa6b1; --line: #2c353d;
+  --accent: #56B4E9; --accent-soft: rgba(86, 180, 233, .12); --ok: #5cc28f; --on-accent: #0b1a24;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0 auto; max-width: 760px; padding: 16px 16px 48px; background: var(--bg); color: var(--ink);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+h1 { font-size: 1.55rem; margin: .2rem 0 0; line-height: 1.2; }
+h2 { font-size: 1.15rem; margin: .4rem 0 .6rem; }
+h3 { font-size: 1rem; margin: 1.1rem 0 .4rem; }
+.sub { margin: .1rem 0 .3rem; font-weight: 600; color: var(--accent); }
+.note, .muted { color: var(--muted); font-size: .88rem; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin: 12px 0; }
+.field { display: block; margin: 6px 0 10px; font-size: .92rem; }
+.field input[type="date"], .field select, .ask input, .field input[type="password"] {
+  display: block; width: 100%; margin-top: 4px; padding: 10px; font-size: 1rem;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink);
+}
+input[type="range"] { width: 100%; margin-top: 8px; accent-color: var(--accent); }
+.check { display: flex; gap: 8px; align-items: center; font-size: .92rem; margin: 4px 0 8px; }
+.tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; position: sticky; top: 0; z-index: 5;
+  background: var(--bg); padding: 6px 0; }
+.tabs button { padding: 10px 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+  color: var(--ink); font-size: .95rem; cursor: pointer; }
+.tabs button[aria-selected="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+.tab { display: none; }
+.tab.active { display: block; }
+.metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.metric { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.metric .label { font-size: .8rem; color: var(--muted); }
+.metric .value { font-size: 1.35rem; font-weight: 650; }
+.metric .delta { font-size: .8rem; color: var(--muted); }
+.fact { border-left: 4px solid var(--accent); background: var(--accent-soft); border-radius: 4px; padding: .4rem .7rem;
+  margin: .45rem 0; font-size: .92rem; }
+.fact b { color: var(--accent); }
+.chart { position: relative; height: 240px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 6px; }
+.chart.small { height: 190px; }
+.examples { display: grid; gap: 6px; }
+.btn { padding: 10px 14px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: var(--on-accent);
+  font-size: .95rem; cursor: pointer; }
+.btn.ghost { background: transparent; color: var(--accent); }
+.btn.example { text-align: left; background: var(--panel); color: var(--ink); border-color: var(--line); }
+.row { display: flex; gap: 8px; flex-wrap: wrap; }
+.chat { margin: 12px 0; display: grid; gap: 8px; }
+.msg { padding: 10px 12px; border-radius: 10px; max-width: 92%; white-space: pre-wrap; }
+.msg.user { justify-self: end; background: var(--accent); color: var(--on-accent); }
+.msg.bot { justify-self: start; background: var(--panel); border: 1px solid var(--line); }
+.msg .foot { display: block; margin-top: 6px; font-size: .78rem; color: var(--muted); }
+.ask { display: grid; grid-template-columns: 1fr auto; gap: 8px; position: sticky; bottom: 0; background: var(--bg); padding: 8px 0; }
+.ask input { margin: 0; }
+summary { cursor: pointer; font-weight: 600; }
+footer { margin-top: 28px; }

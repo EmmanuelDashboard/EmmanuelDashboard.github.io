@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI-Assisted Modern Greenhouse</title>
+  <meta name="description" content="Monitoring & Control: a simulated lettuce greenhouse in Ontario, with the controller's decisions explained in plain words.">
+  <meta name="theme-color" content="#0072B2">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230072B2'/%3E%3Cpath d='M6 26V14l10-7 10 7v12z' fill='none' stroke='%23fff' stroke-width='2.4' stroke-linejoin='round'/%3E%3Cpath d='M16 25c0-5 2-8 6-9-1 5-3 8-6 9zm0 0c0-4-2-6-5-7 1 4 2 6 5 7z' fill='%2366d19e'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>AI-Assisted Modern Greenhouse</h1>
+    <p class="sub">Monitoring &amp; Control</p>
+    <p class="note" id="note">Loading the greenhouse data…</p>
+  </header>
+
+  <section class="card period" aria-label="Period to show">
+    <label class="field">Start day
+      <input type="date" id="start">
+    </label>
+    <label class="field">Number of days: <b id="nlabel">1</b>
+      <input type="range" id="ndays" min="1" max="151" value="1">
+    </label>
+    <p class="muted" id="showing"></p>
+  </section>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="summary" aria-selected="true">Summary</button>
+    <button role="tab" data-tab="charts" aria-selected="false">Charts</button>
+    <button role="tab" data-tab="ask" aria-selected="false">Ask</button>
+    <button role="tab" data-tab="facts" aria-selected="false">Facts</button>
+  </nav>
+
+  <main>
+    <section class="tab active" id="tab-summary">
+      <h2 id="sum-title">Summary</h2>
+      <div class="metrics" id="metrics"></div>
+      <h3>What the controller did</h3>
+      <div id="daily"></div>
+      <details class="card">
+        <summary>Whole season and harvests</summary>
+        <div id="season"></div>
+      </details>
+    </section>
+
+    <section class="tab" id="tab-charts">
+      <p class="muted" id="chart-note"></p>
+      <h3>Temperature <span class="muted">· blue band = allowed range</span></h3>
+      <div class="chart"><canvas id="c-temp"></canvas></div>
+      <h3>Humidity <span class="muted">· dashed line = maximum</span></h3>
+      <div class="chart small"><canvas id="c-rh"></canvas></div>
+      <h3>Heating (W/m²)</h3>
+      <div class="chart small"><canvas id="c-heat"></canvas></div>
+      <h3>Vents / ventilation (mm/s)</h3>
+      <div class="chart small"><canvas id="c-vent"></canvas></div>
+      <h3>Sunlight (W/m²)</h3>
+      <div class="chart small"><canvas id="c-sun"></canvas></div>
+      <h3>CO₂ (ppm)</h3>
+      <div class="chart small"><canvas id="c-co2"></canvas></div>
+    </section>
+
+    <section class="tab" id="tab-ask">
+      <details class="card" id="ai-box">
+        <summary>Connect AI <span class="muted" id="ai-status">· not connected</span></summary>
+        <p class="muted">Optional. Without a key you still get instant answers from the data. With a free Gemini key
+          (aistudio.google.com → Get API key) the answer is reworded in natural language. The key stays in this browser
+          and is sent only to Google. On Google's free tier, Google may use what you send to improve its products, so do
+          not type private farm data.</p>
+        <label class="field">Gemini API key
+          <input type="password" id="key" autocomplete="off" placeholder="Paste your key">
+        </label>
+        <label class="check"><input type="checkbox" id="remember"> Remember the key on this device</label>
+        <div class="row">
+          <button class="btn" id="check">Check connection</button>
+          <button class="btn ghost" id="forget">Forget key</button>
+        </div>
+        <p class="muted" id="check-msg"></p>
+      </details>
+      <p class="muted">Ask in your own words, or tap an example:</p>
+      <div id="examples" class="examples"></div>
+      <div id="chat" class="chat" aria-live="polite"></div>
+      <form id="ask-form" class="ask">
+        <input id="question" type="text" placeholder="Type your question" autocomplete="off">
+        <button class="btn" type="submit">Ask</button>
+      </form>
+      <button class="btn ghost" id="clear" hidden>Clear conversation</button>
+    </section>
+
+    <section class="tab" id="tab-facts">
+      <label class="field">Topic
+        <select id="topic">
+          <option value="all">All</option><option value="heating">Heating</option>
+          <option value="temperature">Temperature</option><option value="humidity">Humidity</option>
+          <option value="ventilation">Ventilation</option><option value="co2_supply">CO₂ supply</option>
+          <option value="co2">CO₂ level</option>
+        </select>
+      </label>
+      <p class="muted" id="facts-note"></p>
+      <div id="facts"></div>
+    </section>
+  </main>
+
+  <footer class="muted">
+    Simulation for research: Van Henten (1994) lettuce greenhouse model controlled by economic model predictive control;
+    weather from Environment and Climate Change Canada (Harrow, Ontario) and NASA POWER. Prices are assumptions.
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

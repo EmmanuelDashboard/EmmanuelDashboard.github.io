@@ -1,0 +1,21 @@
+{
+ "site": "Harrow, Ontario (AAFC Harrow Research and Development Centre)",
+ "weather_note": "dates are a 2027 scenario; weather was recorded at Harrow, Ontario in 2026 and replayed on the same calendar days",
+ "limits": {
+  "t_night": [
+   10.0,
+   15.0
+  ],
+  "t_day": [
+   15.0,
+   20.0
+  ],
+  "rh_max": 80.0,
+  "co2_max": 1600.0
+ },
+ "prices": {
+  "heat_cad_per_kwh": 0.037393162393162385,
+  "co2_cad_per_kg": 0.3
+ },
+ "exported": "2026-11-19"
+}
