@@ -14,7 +14,8 @@ const GAP_MS = { raw: 2 * 60e3, sum: 15 * 60e3 };
 const COL = { blue: "#0072B2", grey: "#999999", dark: "#6f6f6f", green: "#009E73", red: "#D55E00",
   sky: "#56B4E9", gold: "#E69F00", pink: "#CC79A7" };
 const S = { range: "30m", cache: { raw: { rows: [], from: null }, sum: { rows: [], from: null } },
-  latest: null, charts: {}, timer: null, sess: null, busy: false, tab: "summary", ai: null };
+  latest: null, charts: {}, timer: null, sess: null, busy: false, tab: "summary", ai: null,
+  fc: { rows: [], fetched: 0 } };       // the controller's (MPC) 6-hour forecast, refreshed every 2 minutes
 const PRICES = { heat_cad_per_kwh: 0.0374, co2_cad_per_kg: 0.30, ...(CFG.prices || {}) };   // same assumptions as the season page
 const RANGE_LABEL = { "30m": "the last 30 minutes", "6h": "the last 6 hours", "24h": "the last 24 hours", "3d": "the last 3 days", "7d": "the last 7 days" };
 const $ = (id) => document.getElementById(id);
@@ -85,7 +86,7 @@ async function authed(path, opts = {}) {
   }
 }
 
-const srcName = (kind) => (kind === "raw" ? CFG.source : `${CFG.source}:5min`);
+const srcName = (kind) => (kind === "raw" ? CFG.source : kind === "fc" ? `${CFG.source}:forecast` : `${CFG.source}:5min`);
 const iso = (ms) => encodeURIComponent(new Date(ms).toISOString());
 
 async function fetchRows(kind, { gte, gt, lt } = {}) {
@@ -145,6 +146,7 @@ function signOut(msg = "") {
   if (S.sess) api("/auth/v1/logout", { method: "POST", token: S.sess.access }).catch(() => {});
   S.sess = null; store.clear(); show("signin");
   S.cache = { raw: { rows: [], from: null }, sum: { rows: [], from: null } };
+  S.fc = { rows: [], fetched: 0 };
   $("signin-msg").textContent = msg;
 }
 
@@ -174,9 +176,13 @@ async function refresh() {
   try {
     await sync("raw", 6);
     await sync("sum", Math.max(24, RANGES[S.range].h));     // at least 24 h for the humidity-sensor check
+    if (Date.now() - S.fc.fetched > 120e3) {
+      S.fc.rows = await fetchRows("fc", { gt: Date.now() });
+      S.fc.fetched = Date.now();
+    }
     const raw = S.cache.raw.rows;
     S.latest = raw.length ? raw[raw.length - 1] : await loadLatest();
-    renderStatus(); renderAlerts(); renderNow(); renderPeriod();
+    renderStatus(); renderAlerts(); renderNow(); renderForecast(); renderPeriod();
     if (S.tab === "charts") renderCharts();
     if (S.tab === "facts") renderFacts();
   } catch (e) {
@@ -311,7 +317,7 @@ function buckets() {
 
 function chart(id, labels, datasets) {
   for (const d of datasets) {                                // a dot on the newest value of each line
-    if (d.hideLegend || d.fill) continue;
+    if (d.hideLegend || d.fill || d.noDot) continue;
     let last = -1;
     d.data.forEach((v, i) => { if (v !== null) last = i; });
     d.pointRadius = d.data.map((_, i) => (i === last ? 3.5 : 0));
@@ -336,8 +342,105 @@ function chart(id, labels, datasets) {
   S.charts[id] = new Chart($(id), cfg);
 }
 
+// ---------------- the controller's 6-hour forecast
+const fcOld = () => !S.fc.rows.length || Date.now() - (S.fc.rows[0].t - 15 * 60e3) > 45 * 60e3;
+const fcMade = () => (S.fc.rows.length ? S.fc.rows[0].t - 15 * 60e3 : null);
+
+// the most likely reason for a planned change in heating, from what the controller knows; 'up' = heating rises
+function why(r, L, up = r.heating_w_m2 >= L.heating_w_m2) {
+  const reasons = [];
+  if (up) {
+    if (r.limit_temp_min > L.limit_temp_min + 0.5) reasons.push(`the higher daytime minimum (${r0(r.limit_temp_min)} °C) starts`);
+    if (r.radiation_w_m2 < L.radiation_w_m2 - 50) reasons.push("the sun goes down");
+    if (r.temp_out_c < L.temp_out_c - 1) reasons.push(`it gets colder outdoors (${f1(r.temp_out_c)} °C)`);
+  } else {
+    if (r.limit_temp_min < L.limit_temp_min - 0.5) reasons.push(`the lower night minimum (${r0(r.limit_temp_min)} °C) starts`);
+    if (r.radiation_w_m2 > L.radiation_w_m2 + 50) reasons.push("the sun warms the greenhouse");
+    if (r.temp_out_c > L.temp_out_c + 1) reasons.push(`it gets milder outdoors (${f1(r.temp_out_c)} °C)`);
+  }
+  return reasons.length ? `because ${reasons.slice(0, 2).join(" and ")}` : "";
+}
+
+function forecastEvents() {
+  const F = S.fc.rows, L = S.latest, ev = [];
+  if (!F.length || !L) return ev;
+  const lim = F.find((r) => Math.abs(r.limit_temp_min - L.limit_temp_min) > 0.5);
+  if (lim) ev.push({ t: lim.t, x: `Around ${fTime.format(lim.t - 15 * 60e3)}–${fTime.format(lim.t)} the ${lim.limit_temp_min > L.limit_temp_min ? "daytime" : "night"} temperature limits start (${r0(lim.limit_temp_min)}–${r0(lim.limit_temp_max)} °C).` });
+  const hi = F.reduce((a, r) => (r.heating_w_m2 > a.heating_w_m2 ? r : a)), lo = F.reduce((a, r) => (r.heating_w_m2 < a.heating_w_m2 ? r : a));
+  if (hi.heating_w_m2 - L.heating_w_m2 >= 15) ev.push({ t: hi.t, x: `Heating will rise from ${r0(L.heating_w_m2)} to about ${r0(hi.heating_w_m2)} W/m² by ${fTime.format(hi.t)} ${why(hi, L)}`.trim() + "." });
+  if (L.heating_w_m2 - lo.heating_w_m2 >= 15) ev.push({ t: lo.t, x: `Heating will fall from ${r0(L.heating_w_m2)} to about ${r0(lo.heating_w_m2)} W/m² by ${fTime.format(lo.t)} ${why(lo, L)}`.trim() + "." });
+  const vent = runs(F, (r) => r.ventilation_mm_s > 0.5, 0, 16 * 60e3)[0];
+  if (vent) {
+    const rs = F.slice(vent[0], vent[1] + 1);
+    ev.push({ t: F[vent[0]].t, x: `The vents should open more (up to ${f1(Math.max(...rs.map((r) => r.ventilation_mm_s)))} mm/s) from about ${fTime.format(F[vent[0]].t)} to ${fTime.format(F[vent[1]].t)}, when indoor reaches ${f1(Math.max(...rs.map((r) => r.temp_c)))} °C.` });
+  }
+  const dosing = (r) => r.co2_supply_mg_m2_s > 0.01, sw = F.find((r) => dosing(r) !== dosing(L));
+  if (sw) ev.push({ t: sw.t, x: `CO₂ dosing should ${dosing(sw) ? "start" : "stop"} around ${fTime.format(sw.t)} ${dosing(sw) ? "(daylight: it helps the lettuce grow)" : "(less light, so extra CO₂ helps less)"}.` });
+  const cold = F.find((r) => r.temp_c < r.limit_temp_min - 0.3), warm = F.find((r) => r.temp_c > r.limit_temp_max + 0.3);
+  if (cold) ev.push({ t: cold.t, x: `The greenhouse may get a little too cold around ${fTime.format(cold.t)} (${f1(cold.temp_c)} °C, minimum ${r0(cold.limit_temp_min)} °C).` });
+  if (warm) ev.push({ t: warm.t, x: `The greenhouse may get too warm around ${fTime.format(warm.t)} (${f1(warm.temp_c)} °C, maximum ${r0(warm.limit_temp_max)} °C).` });
+  if (!ev.length) ev.push({ t: F[0].t, x: `No big changes expected: indoor ${span(Math.min(...F.map((r) => r.temp_c)), Math.max(...F.map((r) => r.temp_c)), 1)} °C, heating ${span(lo.heating_w_m2, hi.heating_w_m2)} W/m².` });
+  return ev.sort((a, b) => a.t - b.t);
+}
+
+function renderForecast() {
+  const F = S.fc.rows, L = S.latest;
+  if (!F.length || !L) {
+    $("fc-table").innerHTML = `<p class="muted">No forecast yet. The controller makes a new 6-hour forecast every 15 minutes while the sensor runs.</p>`;
+    $("fc-events").innerHTML = ""; $("fc-note").textContent = ""; return;
+  }
+  const pick = (h) => F.reduce((a, r) => (Math.abs(r.t - (fcMade() + h * 3600e3)) < Math.abs(a.t - (fcMade() + h * 3600e3)) ? r : a));
+  const row = (label, r) => `<tr><th scope="row">${label}<br><span class="muted tiny">${fTime.format(r.t)}</span></th><td>${f1(r.temp_c)} °C</td><td>${r0(r.rh_pct)} %</td><td>${r0(r.co2_ppm)} ppm</td><td>${r0(r.heating_w_m2)} W/m²</td></tr>`;
+  $("fc-table").innerHTML = `<table class="cmp fc"><thead><tr><th></th><th>Indoor</th><th>Humidity</th><th>CO₂</th><th>Heating</th></tr></thead><tbody>` +
+    row("Now", L) + row("In 1 h", pick(1)) + row("In 3 h", pick(3)) + row("In 6 h", pick(6)) + `</tbody></table>`;
+  $("fc-events").innerHTML = forecastEvents().map((e) => `<li>${esc(e.x)}</li>`).join("");
+  $("fc-note").textContent = `Forecast made at ${fTime.format(fcMade())} by the controller (MPC): its own predictions and plan. ` +
+    (CFG.source === "pretend" ? "With the pretend sensor this is the forecast the simulation's controller made at that moment. " : "") +
+    "It assumes the weather forecast is right." + (fcOld() ? " This forecast is old: the sensor may have stopped." : "");
+}
+
+function renderForecastCharts() {
+  const F = S.fc.rows, L = S.latest;
+  if (!F.length || !L) { $("fc-chart-note").textContent = "No forecast yet."; return; }
+  const step = 5 * 60e3, now = Date.now(), start = Math.floor((now - 3600e3) / step) * step, end = F[F.length - 1].t;
+  const n = Math.round((end - start) / step) + 1, times = Array.from({ length: n }, (_, i) => start + i * step);
+  const nowIdx = Math.min(n - 1, Math.floor((L.t - start) / step));
+  const measured = (k) => {
+    const s = new Map();
+    for (const r of S.cache.raw.rows) {
+      const i = Math.floor((r.t - start) / step);
+      if (i < 0 || i >= n || r[k] === null) continue;
+      const v = s.get(i) || [0, 0]; v[0] += r[k]; v[1]++; s.set(i, v);
+    }
+    return times.map((_, i) => (s.has(i) ? s.get(i)[0] / s.get(i)[1] : null));
+  };
+  const predicted = (k) => {
+    const out = times.map(() => null);
+    out[nowIdx] = L[k];                                        // join the dashed line to the latest reading
+    for (const r of F) { const i = Math.round((r.t - start) / step); if (i >= 0 && i < n) out[i] = r[k]; }
+    return out;
+  };
+  const both = (k) => { const m = measured(k), p = predicted(k); return m.map((v, i) => (i <= nowIdx && v !== null ? v : p[i])); };
+  const labels = times.map((t, i) => (i === nowIdx ? "now" : fTime.format(t)));
+  const fc = (label, k, color) => ({ label: `${label} forecast`, data: predicted(k), borderColor: color, borderDash: [6, 4], spanGaps: true, noDot: true });
+  $("fc-chart-note").textContent = `Forecast made at ${fTime.format(fcMade())}; it reaches ${fTime.format(end)}.` + (fcOld() ? " It is old: the sensor may have stopped." : "");
+  chart("f-temp", labels, [
+    { label: "min", data: both("limit_temp_min"), borderColor: "transparent", hideLegend: true, spanGaps: true },
+    { label: "max", data: both("limit_temp_max"), borderColor: "transparent", backgroundColor: "rgba(0,114,178,.13)", fill: "-1", hideLegend: true, spanGaps: true },
+    { label: "Indoor", data: measured("temp_c"), borderColor: COL.blue }, fc("Indoor", "temp_c", COL.blue),
+    { label: "Outdoor", data: measured("temp_out_c"), borderColor: COL.grey }, fc("Outdoor", "temp_out_c", COL.grey)]);
+  chart("f-rh", labels, [
+    { label: "Indoor", data: measured("rh_pct"), borderColor: COL.green }, fc("Indoor", "rh_pct", COL.green),
+    { label: "Outdoor", data: measured("rh_out_pct"), borderColor: COL.grey }, fc("Outdoor", "rh_out_pct", COL.grey)]);
+  chart("f-heat", labels, [{ label: "Heating", data: measured("heating_w_m2"), borderColor: COL.red },
+    fc("Heating", "heating_w_m2", COL.red)]);
+  chart("f-co2", labels, [{ label: "Indoor", data: measured("co2_ppm"), borderColor: COL.pink }, fc("Indoor", "co2_ppm", COL.pink)]);
+}
+
 function renderCharts() {
   if (typeof Chart === "undefined") { $("chart-note").textContent = "Charts need an internet connection to load."; return; }
+  renderForecastCharts();
+  $("hist-label").textContent = `· ${RANGE_LABEL[S.range]}`;
   const { labels, series } = buckets(), R = RANGES[S.range];
   $("chart-note").textContent = `Grey line = outdoor, coloured line = indoor. ` +
     (R.b < 1 ? `Every reading (every ${EVERY_S} s)` : R.src === "raw" ? `Readings every ${EVERY_S} s, shown as 1-min averages` : `${R.b}-min averages`) +
@@ -519,6 +622,7 @@ function makeFacts() {
     if (d > gapMs) facts.push({ v: "sensors", t: rows[k - 1].t, x: `No readings from ${tStr(rows[k - 1].t, wd)} to ${tStr(rows[k].t, wd)} (${ago(d).replace(" ago", "")}).` });
   }
   for (const [kind, text] of sensorChecks()) if (kind === "bad" || kind === "warn") facts.push({ v: "sensors", t: Date.now(), x: text });
+  for (const e of forecastEvents()) facts.push({ v: "forecast", t: e.t, x: `Forecast: ${e.x}` });
   return facts.sort((p, q) => q.t - p.t);
 }
 
@@ -527,7 +631,7 @@ function renderFacts() {
   const list = all.filter((f) => topic === "all" || f.v === topic);
   $("facts-note").textContent = `${list.length} fact${list.length === 1 ? "" : "s"} for ${RANGE_LABEL[S.range]}, newest first` +
     (list.length > 150 ? "; showing the first 150." : ".");
-  const NAME = { day: "day", temperature: "temperature", humidity: "humidity", heating: "heating", ventilation: "vents", co2: "CO₂", sensors: "sensors" };
+  const NAME = { forecast: "forecast", day: "day", temperature: "temperature", humidity: "humidity", heating: "heating", ventilation: "vents", co2: "CO₂", sensors: "sensors" };
   $("facts").innerHTML = list.slice(0, 150).map((f) => `<div class="fact"><b>${NAME[f.v]}</b> · ${esc(f.x)}</div>`).join("") ||
     `<p class="muted">Nothing to report for this topic in this period.</p>`;
 }
@@ -540,14 +644,95 @@ function windowFor(ql) {
     const d = fDate.format(now);
     return { rows: S.cache.sum.rows.filter((r) => fDate.format(r.t) === d), dt: 300, label: "today" };
   }
+  const m = ql.match(/(?:last|past) (\d+(?:\.\d+)?)\s*(minutes?|mins?|hours?|hrs?|h|days?)\b/) ||
+    (/(?:last|past|this) week/.test(ql) ? [null, "7", "days"] : null);
+  if (m) {                                                   // the question names its own time window
+    const hours = parseFloat(m[1]) * (m[2].startsWith("d") ? 24 : m[2].startsWith("m") ? 1 / 60 : 1);
+    const src = hours <= 6 ? "raw" : "sum", since = now - hours * 3600e3, c = S.cache[src];
+    const note = c.from !== null && c.from > since + 600e3 ? ` (only ${Math.round((now - c.from) / 3600e3)} h loaded: choose a longer period at the top for more)` : "";
+    return { rows: c.rows.filter((r) => r.t >= since), dt: stepS(src), label: `in the last ${m[1]} ${m[2].replace(/^hrs?$|^h$/, "hours")}${note}` };
+  }
   let rows = rowsInRange(), label = `in ${RANGE_LABEL[S.range]}`;
   if (/night|tonight/.test(ql)) { rows = rows.filter((r) => r.radiation_w_m2 < 10); label = `at night (${RANGE_LABEL[S.range]})`; }
   return { rows, dt: stepS(RANGES[S.range].src), label };
 }
 
+// questions about the future are answered from the controller's forecast
+const fHM = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+function isFuture(ql) {
+  if (/\b(was|were|did|had|yesterday|last)\b/.test(ql)) return false;
+  return /\b(will|going to|forecast|predict|expect|expected|later|tonight|this evening|soon|upcoming|plan|plans|planned|tomorrow|next \d|next hour|next few)\b|\bin \d+(\.\d+)?\s*(h|hr|hrs|hour|hours|min|mins|minute|minutes)\b|\bat \d{1,2}(:\d{2})?\s*(am|pm)?\b/.test(ql);
+}
+function targetTime(ql) {
+  const now = Date.now();
+  let m = ql.match(/\bin (\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours|min|mins|minute|minutes)\b/);
+  if (m) return now + parseFloat(m[1]) * (m[2].startsWith("h") ? 3600e3 : 60e3);
+  m = ql.match(/\bat (\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/);
+  if (m) {
+    let h = parseInt(m[1], 10) % 24; const mi = parseInt(m[2] || "0", 10);
+    if (m[3] === "pm" && h < 12) h += 12;
+    if (m[3] === "am" && h === 12) h = 0;
+    const [nh, nm] = fHM.format(now).split(":").map(Number);
+    let diff = h * 60 + mi - (nh * 60 + nm);
+    if (diff < 0 && !m[3] && h < 12 && diff + 720 > 0) diff += 720;   // "at 4" in the afternoon means 16:00
+    if (diff < 0) diff += 1440;
+    return now + diff * 60e3;
+  }
+  if (/tonight|this evening/.test(ql)) return "night";
+  return null;
+}
+
+function futureAnswer(ql) {
+  const F = S.fc.rows, L = S.latest;
+  if (!F.length) return "There is no forecast yet. The controller makes a new 6-hour forecast every 15 minutes while the sensor runs.";
+  const end = F[F.length - 1].t;
+  const made = ` (forecast by the controller, made at ${fTime.format(fcMade())}${fcOld() ? "; it is old, the sensor may have stopped" : ""}; it assumes the weather forecast is right)`;
+  if (/tomorrow|next week|next day/.test(ql)) return `The forecast only covers the next 6 hours, until ${fTime.format(end)}.`;
+  const tgt = targetTime(ql);
+  if (typeof tgt === "number" && tgt > end + 8 * 60e3) return `The forecast only reaches ${fTime.format(end)} (6 hours ahead). Ask about a time before then.`;
+  const at = typeof tgt === "number" ? F.reduce((a, r) => (Math.abs(r.t - tgt) < Math.abs(a.t - tgt) ? r : a)) : null;
+  const night = F.filter((r) => r.radiation_w_m2 < 10), rows = tgt === "night" && night.length ? night : F;
+  const when = at ? `At ${fTime.format(at.t)}` : tgt === "night" ? `Tonight (until ${fTime.format(end)})` : `In the next 6 hours (until ${fTime.format(end)})`;
+  const has = (...w) => w.some((x) => ql.includes(x));
+  const ext = (k) => [Math.min(...rows.map((r) => r[k])), Math.max(...rows.map((r) => r[k]))];
+  const hiR = (k) => rows.reduce((a, r) => (r[k] > a[k] ? r : a)), loR = (k) => rows.reduce((a, r) => (r[k] < a[k] ? r : a));
+  if (has("heat")) {
+    if (at) return `${when} the controller plans heating at ${r0(at.heating_w_m2)} W/m² (now ${r0(L.heating_w_m2)}) ${why(at, L)}`.trim() + "." + made;
+    const hi = hiR("heating_w_m2"), lo = loR("heating_w_m2");
+    if (hi.heating_w_m2 - L.heating_w_m2 >= 15) return `Yes — heating will rise from ${r0(L.heating_w_m2)} W/m² now to about ${r0(hi.heating_w_m2)} W/m² by ${fTime.format(hi.t)} ${why(hi, L)}`.trim() + "." + made;
+    if (L.heating_w_m2 - lo.heating_w_m2 >= 15) return `No — heating will fall from ${r0(L.heating_w_m2)} W/m² now to about ${r0(lo.heating_w_m2)} W/m² by ${fTime.format(lo.t)} ${why(lo, L)}`.trim() + "." + made;
+    return `${when} heating stays about ${span(lo.heating_w_m2, hi.heating_w_m2)} W/m² (now ${r0(L.heating_w_m2)}).` + made;
+  }
+  if (has("vent", "window", "open")) {
+    if (at) return `${when} the vents should be at ${f1(at.ventilation_mm_s)} mm/s (indoor ${f1(at.temp_c)} °C, ${r0(at.rh_pct)} % humidity).` + made;
+    const v = runs(rows, (r) => r.ventilation_mm_s > 0.5, 0, 16 * 60e3)[0];
+    if (v) return `Yes — the controller plans to open the vents more (up to ${f1(Math.max(...rows.slice(v[0], v[1] + 1).map((r) => r.ventilation_mm_s)))} mm/s) from about ${fTime.format(rows[v[0]].t)} to ${fTime.format(rows[v[1]].t)}, when indoor reaches ${f1(Math.max(...rows.slice(v[0], v[1] + 1).map((r) => r.temp_c)))} °C.` + made;
+    return `No — no big vent openings are planned ${when.toLowerCase()}; they stay at about ${span(...ext("ventilation_mm_s"), 2)} mm/s to hold humidity at ${LIM.rh_max} %.` + made;
+  }
+  if (has("humid", "moist", "wet")) {
+    if (at) return `${when} indoor humidity should be ${r0(at.rh_pct)} % (limit ${LIM.rh_max} %) with ${r0(at.rh_out_pct)} % outdoors.` + made;
+    return `${when} indoor humidity should stay at ${span(...ext("rh_pct"))} % (limit ${LIM.rh_max} %) while outdoor humidity is ${span(...ext("rh_out_pct"))} %.` + made;
+  }
+  if (has("co2", "co₂", "carbon")) {
+    const dosing = (r) => r.co2_supply_mg_m2_s > 0.01, sw = rows.find((r) => dosing(r) !== dosing(L));
+    if (at) return `${when} indoor CO₂ should be ${r0(at.co2_ppm)} ppm with dosing ${dosing(at) ? "on" : "off"} (outdoor ${r0(at.co2_out_ppm)} ppm).` + made;
+    return `${when} indoor CO₂ should be ${span(...ext("co2_ppm"))} ppm` + (sw ? `; dosing will ${dosing(sw) ? "start" : "stop"} around ${fTime.format(sw.t)}.` : ".") + made;
+  }
+  if (has("grow", "harvest", "yield", "weight", "lettuce")) return "The forecast covers the climate and the equipment, not lettuce growth. Ask about temperature, humidity, CO₂, heating or vents.";
+  // temperature or general
+  if (at) return `${when} the greenhouse should be ${f1(at.temp_c)} °C (allowed ${r0(at.limit_temp_min)}–${r0(at.limit_temp_max)} °C) with ${f1(at.temp_out_c)} °C outdoors and heating at ${r0(at.heating_w_m2)} W/m².` + made;
+  const lim = rows.find((r) => Math.abs(r.limit_temp_min - L.limit_temp_min) > 0.5);
+  const cold = rows.find((r) => r.temp_c < r.limit_temp_min - 0.3), warm = rows.find((r) => r.temp_c > r.limit_temp_max + 0.3);
+  return `${when} the greenhouse should stay at ${span(...ext("temp_c"), 1)} °C while it is ${span(...ext("temp_out_c"), 1)} °C outdoors` +
+    (lim ? `; the ${lim.limit_temp_min > L.limit_temp_min ? "daytime" : "night"} limits (${r0(lim.limit_temp_min)}–${r0(lim.limit_temp_max)} °C) start around ${fTime.format(lim.t)}` : "") +
+    (cold ? `; it may dip below the minimum around ${fTime.format(cold.t)} (${f1(cold.temp_c)} °C)` : "") +
+    (warm ? `; it may go above the maximum around ${fTime.format(warm.t)} (${f1(warm.temp_c)} °C)` : "") + "." + made;
+}
+
 function liveAnswer(q) {
   const ql = q.toLowerCase() + " ", L = S.latest;
   if (!L) return "There are no readings yet. Start the sensor box (or the pretend sensor), then ask again.";
+  if (isFuture(ql)) return futureAnswer(ql);
   const has = (...w) => w.some((x) => ql.includes(x));
   const nowAsked = has(" now", "right now", "current", "at the moment", "is it ");
   const { rows, dt, label } = windowFor(ql), s = rows.length ? stats(rows, dt) : null;
@@ -595,14 +780,19 @@ function liveContext(q) {
   if (L) lines.push(`Now (${fFull.format(L.t)}): indoor ${f1(L.temp_c)} °C, ${r0(L.rh_pct)} % humidity, ${r0(L.co2_ppm)} ppm CO₂; outdoor ${f1(L.temp_out_c)} °C, ${r0(L.rh_out_pct)} %, ${r0(L.co2_out_ppm)} ppm; heating ${r0(L.heating_w_m2)} W/m², vents ${f1(L.ventilation_mm_s)} mm/s.`);
   const topics = { heating: ["heat"], temperature: ["temperat", "warm", "cold", "hot", "okay"], humidity: ["humid"], ventilation: ["vent", "window", "open"], co2: ["co2", "co₂"] };
   const named = Object.keys(topics).filter((k) => topics[k].some((w) => ql.includes(w)));
-  makeFacts().filter((f) => f.v !== "day" && (!named.length || named.includes(f.v))).slice(0, 4).forEach((f) => lines.push(`- ${f.x}`));
+  if (isFuture(ql + " ") && S.fc.rows.length) {
+    lines.push(`Controller forecast made at ${fTime.format(fcMade())} (it assumes the weather forecast is right):`);
+    forecastEvents().forEach((e) => lines.push(`- ${e.x}`));
+  } else {
+    makeFacts().filter((f) => f.v !== "day" && f.v !== "forecast" && (!named.length || named.includes(f.v))).slice(0, 4).forEach((f) => lines.push(`- ${f.x}`));
+  }
   return lines.join("\n");
 }
 
 function renderExamples() {
   if (!S.ai) return;
-  S.ai.setExamples(["Is the temperature okay now?", "Should I open the vents now?", "Why is heating high today?",
-    `How was humidity in ${RANGE_LABEL[S.range]}?`]);
+  S.ai.setExamples(["Is the temperature okay now?", "Will heating go up tonight?", "What will the temperature be in 2 hours?",
+    "Will the vents open later?", "Why is heating high today?", `How was humidity in ${RANGE_LABEL[S.range]}?`]);
 }
 
 // ---------------- start

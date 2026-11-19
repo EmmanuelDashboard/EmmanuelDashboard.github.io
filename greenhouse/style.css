@@ -107,4 +107,8 @@ a.btn { text-decoration: none; display: inline-block; }
 .cmp td { vertical-align: top; }
 @keyframes flash { from { background: var(--accent-soft); } to { background: var(--panel); } }
 .flash { animation: flash 1.2s ease-out; }
+.events { margin: .6rem 0 .2rem; padding-left: 1.1rem; font-size: .92rem; }
+.events li { margin: .25rem 0; }
+.cmp.fc th, .cmp.fc td { padding: 6px 4px; font-size: .88rem; }
+h2.flush { margin-top: .2rem; }
 .tabs button { display: inline-flex; align-items: center; justify-content: center; }
