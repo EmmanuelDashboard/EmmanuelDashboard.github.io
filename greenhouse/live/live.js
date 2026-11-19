@@ -5,10 +5,16 @@
 
 const CFG = window.LIVE_CONFIG || {};
 const LIM = { rh_max: 80, co2_max: 1600, ...(CFG.limits || {}) };
-const RANGES = { "6h": { h: 6, b: 5 }, "24h": { h: 24, b: 15 }, "3d": { h: 72, b: 30 }, "7d": { h: 168, b: 60 } };
+// The sensor sends a reading every 20 s ('raw') and a 5-minute average ('sum', source name + ':5min').
+// 6 h charts use the raw readings; longer periods use the averages, so phones download little data.
+const EVERY_S = 20, REFRESH_MS = 20000;
+const RANGES = { "6h": { h: 6, b: 1, src: "raw" }, "24h": { h: 24, b: 5, src: "sum" },
+  "3d": { h: 72, b: 30, src: "sum" }, "7d": { h: 168, b: 60, src: "sum" } };
+const GAP_MS = { raw: 2 * 60e3, sum: 15 * 60e3 };
 const COL = { blue: "#0072B2", grey: "#999999", dark: "#6f6f6f", green: "#009E73", red: "#D55E00",
   sky: "#56B4E9", gold: "#E69F00", pink: "#CC79A7" };
-const S = { range: "24h", rows: [], latest: null, charts: {}, timer: null, sess: null };
+const S = { range: "24h", cache: { raw: { rows: [], from: null }, sum: { rows: [], from: null } },
+  latest: null, charts: {}, timer: null, sess: null, busy: false };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (v, d = 0) => (v === null || v === undefined || Number.isNaN(v) ? "–" : Number(v).toFixed(d));
@@ -18,10 +24,10 @@ const tz = CFG.tz || undefined;
 const fTime = new Intl.DateTimeFormat("en-CA", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false });
 const fDay = new Intl.DateTimeFormat("en-GB", { timeZone: tz, day: "2-digit", month: "short" });
 const fFull = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
-  hour: "2-digit", minute: "2-digit", hour12: false });
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
 function ago(ms) {
+  if (ms < 60000) return `${Math.max(0, Math.round(ms / 1000))} s ago`;
   const m = Math.round(ms / 60000);
-  if (m < 1) return "just now";
   if (m < 60) return `${m} min ago`;
   const h = m / 60;
   return h < 48 ? `${h.toFixed(h < 10 ? 1 : 0)} h ago` : `${Math.round(h / 24)} days ago`;
@@ -76,15 +82,39 @@ async function authed(path, opts = {}) {
   }
 }
 
-async function loadRows(hours) {
-  const since = new Date(Date.now() - hours * 3600e3).toISOString(), rows = [], page = 1000;
+const srcName = (kind) => (kind === "raw" ? CFG.source : `${CFG.source}:5min`);
+const iso = (ms) => encodeURIComponent(new Date(ms).toISOString());
+
+async function fetchRows(kind, { gte, gt, lt } = {}) {
+  let q = `/rest/v1/readings?select=*&source=eq.${encodeURIComponent(srcName(kind))}`;
+  if (gte !== undefined) q += `&ts=gte.${iso(gte)}`;
+  if (gt !== undefined) q += `&ts=gt.${iso(gt)}`;
+  if (lt !== undefined) q += `&ts=lt.${iso(lt)}`;
+  const rows = [], page = 1000;
   for (let off = 0; ; off += page) {
-    const part = await authed(`/rest/v1/readings?select=*&source=eq.${encodeURIComponent(CFG.source)}` +
-      `&ts=gte.${encodeURIComponent(since)}&order=ts.asc&limit=${page}&offset=${off}`);
+    const part = await authed(`${q}&order=ts.asc&limit=${page}&offset=${off}`);
     rows.push(...part);
     if (part.length < page) break;
   }
   return rows.map((r) => ({ ...r, t: Date.parse(r.ts) }));
+}
+
+// Keep what was already downloaded; only ask for older rows (when the period grows) and newer rows.
+async function sync(kind, hours) {
+  const c = S.cache[kind], since = Date.now() - hours * 3600e3;
+  if (c.from === null || since < c.from) {
+    const older = await fetchRows(kind, { gte: since, lt: c.from === null ? undefined : c.from });
+    c.rows = older.concat(c.rows);
+    c.from = since;
+  }
+  if (c.rows.length) c.rows = c.rows.concat(await fetchRows(kind, { gt: c.rows[c.rows.length - 1].t }));
+  const keep = Date.now() - 7.2 * 24 * 3600e3;
+  if (c.rows.length && c.rows[0].t < keep) { c.rows = c.rows.filter((r) => r.t >= keep); c.from = Math.max(c.from, keep); }
+}
+
+function rowsInRange() {
+  const R = RANGES[S.range], since = Date.now() - R.h * 3600e3;
+  return S.cache[R.src].rows.filter((r) => r.t >= since);
 }
 
 async function loadLatest() {
@@ -104,13 +134,14 @@ async function openView() {
   $("pretend-note").hidden = CFG.source !== "pretend";
   await refresh();
   clearInterval(S.timer);
-  S.timer = setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 60000);
+  S.timer = setInterval(() => { if (document.visibilityState === "visible") refresh(); }, REFRESH_MS);
 }
 
 function signOut(msg = "") {
   clearInterval(S.timer);
   if (S.sess) api("/auth/v1/logout", { method: "POST", token: S.sess.access }).catch(() => {});
   S.sess = null; store.clear(); show("signin");
+  S.cache = { raw: { rows: [], from: null }, sum: { rows: [], from: null } };
   $("signin-msg").textContent = msg;
 }
 
@@ -135,32 +166,36 @@ async function signIn(ev) {
 
 // ---------------- refresh and render
 async function refresh() {
+  if (S.busy) return;
+  S.busy = true;
   try {
-    const [rows, latest] = await Promise.all([loadRows(RANGES[S.range].h), loadLatest()]);
-    S.rows = rows; S.latest = latest;
+    await sync("raw", 6);
+    await sync("sum", Math.max(24, RANGES[S.range].h));     // at least 24 h for the humidity-sensor check
+    const raw = S.cache.raw.rows;
+    S.latest = raw.length ? raw[raw.length - 1] : await loadLatest();
     renderStatus(); renderAlerts(); renderNow(); renderCharts();
   } catch (e) {
     if (e.status === 401 || e.status === 400) signOut("Your sign-in expired. Please sign in again.");
-    else { $("status-text").textContent = `Could not load new readings (${e.message || "no connection"}). Retrying every minute.`; $("dot").className = "dot warn"; }
-  }
+    else { $("status-text").textContent = `Could not load new readings (${e.message || "no connection"}). Retrying every 20 seconds.`; $("dot").className = "dot warn"; }
+  } finally { S.busy = false; }
 }
 
 function renderStatus() {
   const L = S.latest;
   if (!L) { $("dot").className = "dot bad"; $("status-text").textContent = "No readings yet."; return; }
   const age = Date.now() - L.t;
-  $("dot").className = `dot ${age > 3600e3 ? "bad" : age > 900e3 ? "warn" : "ok"}`;
-  $("status-text").textContent = `Last reading ${fFull.format(L.t)} · ${ago(age)} · updates every minute`;
+  $("dot").className = `dot ${age > 15 * 60e3 ? "bad" : age > 2 * 60e3 ? "warn" : "ok"}`;
+  $("status-text").textContent = `Last reading ${fFull.format(L.t)} · ${ago(age)} · updates every 20 seconds`;
 }
 
 function alertBox(kind, text) { return `<div class="alert ${kind}">${esc(text)}</div>`; }
 
 function sensorChecks() {
-  const out = [], L = S.latest, rows = S.rows;
+  const out = [], L = S.latest, rows = S.cache.raw.rows, sums = S.cache.sum.rows;
   if (!L) return [["bad", "No readings yet. Start the sensor box (or the pretend sensor)."]];
   const age = Date.now() - L.t;
-  if (age > 3600e3) out.push(["bad", `No readings for ${ago(age).replace(" ago", "")}. Check that the sensor box has power and internet.`]);
-  else if (age > 900e3) out.push(["warn", `No new reading for ${ago(age).replace(" ago", "")} (expected every 5 minutes).`]);
+  if (age > 15 * 60e3) out.push(["bad", `No readings for ${ago(age).replace(" ago", "")}. Check that the sensor box has power and internet.`]);
+  else if (age > 2 * 60e3) out.push(["warn", `No new reading for ${ago(age).replace(" ago", "")} (expected every ${EVERY_S} seconds).`]);
   const NAMES = { temp_c: "Indoor temperature", rh_pct: "Indoor humidity", co2_ppm: "Indoor CO₂",
     temp_out_c: "Outdoor temperature", rh_out_pct: "Outdoor humidity" };
   const RANGE = { temp_c: [-40, 60], temp_out_c: [-50, 50], rh_pct: [0, 100.5], rh_out_pct: [0, 100.5], co2_ppm: [250, 5000] };
@@ -178,18 +213,22 @@ function sensorChecks() {
     }
   }
   for (const k of ["rh_pct", "rh_out_pct"]) {             // a wet or failing humidity sensor reads ~100 % for hours
-    let i = rows.length - 1;
-    while (i >= 0 && rows[i][k] >= 99.5) i--;
-    const span = i < rows.length - 1 ? L.t - rows[i + 1].t : 0;
+    let i = sums.length - 1;
+    while (i >= 0 && sums[i][k] >= 99.5) i--;
+    const span = i < sums.length - 1 ? sums[sums.length - 1].t - sums[i + 1].t + 5 * 60e3 : 0;
     if (span >= 12 * 3600e3) out.push(["warn", `${NAMES[k]} has read about 100 % for ${Math.round(span / 3600e3)} hours: the sensor may be wet or stuck.`]);
   }
+  const shown = rowsInRange(), gapMs = GAP_MS[RANGES[S.range].src];
   let gaps = 0, longest = 0;
-  for (let i = 1; i < rows.length; i++) {
-    const d = rows[i].t - rows[i - 1].t;
-    if (d > 15 * 60e3) { gaps++; longest = Math.max(longest, d); }
+  for (let i = 1; i < shown.length; i++) {
+    const d = shown[i].t - shown[i - 1].t;
+    if (d > gapMs) { gaps++; longest = Math.max(longest, d); }
   }
   if (gaps) out.push(["info", `${gaps} gap${gaps > 1 ? "s" : ""} in the readings during this period (longest ${ago(longest).replace(" ago", "")}).`]);
-  if (!out.length) out.push(["ok", `Sensors look fine: ${rows.length} readings in this period, no gaps.`]);
+  if (!out.length) {
+    const n = RANGES[S.range].src === "raw" ? `${shown.length} readings` : `${shown.length} five-minute averages`;
+    out.push(["ok", `Sensors look fine: ${n} in this period, no gaps.`]);
+  }
   return out;
 }
 
@@ -222,7 +261,7 @@ function renderNow() {
 function buckets() {
   const { h, b } = RANGES[S.range], step = b * 60e3, end = Math.ceil(Date.now() / step) * step, start = end - h * 3600e3;
   const n = Math.round((end - start) / step), sums = new Map();
-  for (const r of S.rows) {
+  for (const r of rowsInRange()) {
     const i = Math.floor((r.t - start) / step);
     if (i < 0 || i >= n) continue;
     if (!sums.has(i)) sums.set(i, {});
@@ -259,8 +298,10 @@ function chart(id, labels, datasets) {
 
 function renderCharts() {
   if (typeof Chart === "undefined") { $("chart-note").textContent = "Charts need an internet connection to load."; return; }
-  const { labels, series } = buckets(), b = RANGES[S.range].b;
-  $("chart-note").textContent = `Grey line = outdoor, coloured line = indoor. ${b === 5 ? "Every reading (5 min)" : `${b}-min averages`}; a break in a line means no readings.`;
+  const { labels, series } = buckets(), R = RANGES[S.range];
+  $("chart-note").textContent = `Grey line = outdoor, coloured line = indoor. ` +
+    (R.src === "raw" ? `Readings every ${EVERY_S} s, shown as 1-min averages` : `${R.b}-min averages`) +
+    "; a break in a line means no readings. Updates every 20 seconds.";
   chart("l-temp", labels, [
     { label: "min", data: series("limit_temp_min"), borderColor: "transparent", hideLegend: true },
     { label: "max", data: series("limit_temp_max"), borderColor: "transparent", backgroundColor: "rgba(0,114,178,.13)", fill: "-1", hideLegend: true },
