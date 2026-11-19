@@ -143,15 +143,14 @@ function renderSummary() {
   const crop = d.K[last]; let cs = last; while (cs > 0 && d.K[cs - 1] === crop) cs--;
   const age = Math.floor((last - cs) / PER_DAY) + 1;
   const crops = new Set(idx.map((i) => d.K[i])).size;
-  const row = (name, inside, outside) => `<tr><th scope="row">${name}</th><td>${inside}</td><td>${outside}</td></tr>`;
+  const row = (name, indoor, outdoor) => `<tr><th scope="row">${name}</th><td>${indoor}</td><td>${outdoor}</td></tr>`;
   $("sum-title").textContent = `Summary · ${S.label}`;
-  $("compare").innerHTML = `<table class="cmp"><thead><tr><th></th><th scope="col">Inside</th><th scope="col">Outside</th></tr></thead><tbody>` +
+  $("compare").innerHTML = `<table class="cmp"><thead><tr><th></th><th scope="col">Indoor</th><th scope="col">Outdoor</th></tr></thead><tbody>` +
     row("Temperature", `${span(...minmax("T", idx))} °C`, `${span(...minmax("To", idx))} °C`) +
     row("Humidity", `${span(...minmax("RH", idx))} %`, `${span(...minmax("RHo", idx))} %`) +
-    row("CO₂", `${span(...minmax("CO2", idx))} ppm`, `${r0(m.co2_out_ppm)} ppm <span class="muted">(typical)</span>`) +
-    row("Sunlight", `<span class="muted">uses outside</span>`, `${f1(tot("R") * 0.25 / 1000)} kWh/m²`) + `</tbody></table>`;
-  $("compare-note").textContent = "Ranges are lowest–highest for the period. The model has no separate inside light value: " +
-    "crop growth and solar heating use the outside sunlight directly. Outside CO₂ is a typical value, not measured.";
+    row("CO₂", `${span(...minmax("CO2", idx))} ppm`, `${span(...minmax("CO2o", idx))} ppm`) +
+    row("Sunlight", `<span class="muted">uses outdoor</span>`, `${f1(tot("R") * 0.25 / 1000)} kWh/m²`) + `</tbody></table>`;
+  $("compare-note").textContent = "Lowest–highest for the period. " + m.sources;
   $("metrics").innerHTML =
     metric("Heating used", `${f2(kwh)} kWh/m²`, `${f2(kwh * m.prices.heat_cad_per_kwh)} CAD/m²`) +
     metric("CO₂ added", `${r0(co2g)} g/m²`, `${(co2g / 1000 * m.prices.co2_cad_per_kg).toFixed(3)} CAD/m²`) +
@@ -211,20 +210,21 @@ function chart(id, datasets, opts = {}) {
 function renderCharts() {
   if (typeof Chart === "undefined") { $("chart-note").textContent = "Charts need an internet connection to load."; return; }
   const k = bucket();
-  $("chart-note").textContent = `Grey line = outside, coloured line = inside. Tap or hover on a chart to see the values · ${k === 1 ? "every 15 min" : k === 2 ? "30-min averages" : k === 4 ? "hourly averages" : k === 24 ? "6-hour averages" : "daily averages"}.`;
+  $("chart-note").textContent = `Grey line = outdoor, coloured line = indoor. Tap or hover on a chart to see the values · ${k === 1 ? "every 15 min" : k === 2 ? "30-min averages" : k === 4 ? "hourly averages" : k === 24 ? "6-hour averages" : "daily averages"}.`;
   const flat = (v) => labels().map(() => v);
   chart("c-temp", [
     { label: "min", data: series("Tmin"), borderColor: "transparent", pointRadius: 0, hideLegend: true },
     { label: "max", data: series("Tmax"), borderColor: "transparent", backgroundColor: "rgba(0,114,178,.13)", fill: "-1", hideLegend: true },
-    { label: "Inside", data: series("T"), borderColor: COL.blue },
-    { label: "Outside", data: series("To"), borderColor: COL.grey },
+    { label: "Indoor", data: series("T"), borderColor: COL.blue },
+    { label: "Outdoor", data: series("To"), borderColor: COL.grey },
   ]);
-  chart("c-rh", [{ label: "Inside", data: series("RH"), borderColor: COL.green },
-    { label: "Outside", data: series("RHo"), borderColor: COL.grey },
+  chart("c-rh", [{ label: "Indoor", data: series("RH"), borderColor: COL.green },
+    { label: "Outdoor", data: series("RHo"), borderColor: COL.grey },
     { label: "max", data: flat(S.meta.limits.rh_max), borderColor: COL.red, borderDash: [5, 4], borderWidth: 1.5, hideLegend: true }]);
-  chart("c-co2", [{ label: "Inside", data: series("CO2"), borderColor: COL.pink },
-    { label: "Outside", data: flat(S.meta.co2_out_ppm), borderColor: COL.grey }]);
-  chart("c-sun", [{ label: "Outside", data: series("R"), borderColor: COL.gold, backgroundColor: "rgba(230,159,0,.3)", fill: true }]);
+  chart("c-co2", [{ label: "Indoor", data: series("CO2"), borderColor: COL.pink },
+    { label: "Outdoor", data: series("CO2o"), borderColor: COL.grey }]);
+  chart("c-co2o", [{ label: "Outdoor", data: series("CO2o"), borderColor: "#6f6f6f" }]);
+  chart("c-sun", [{ label: "Outdoor", data: series("R"), borderColor: COL.gold, backgroundColor: "rgba(230,159,0,.3)", fill: true }]);
   chart("c-heat", [{ label: "Heating", data: series("H"), borderColor: COL.red, backgroundColor: "rgba(213,94,0,.25)", fill: true }]);
   chart("c-vent", [{ label: "Ventilation", data: series("V"), borderColor: COL.sky, backgroundColor: "rgba(86,180,233,.3)", fill: true }]);
 }
@@ -268,7 +268,7 @@ function quickAnswer(q) {
 
   if (has("vent", "window", "open", "cool")) {
     if (above.length) return `Yes — on ${when} the greenhouse got too warm (up to ${f1(hi)} °C around ${tf(iHi)}), so the controller opened the vents for ${f1(ventH)} h to cool it.`;
-    return `No need — on ${when} the greenhouse never got too warm (highest ${f1(hi)} °C while it was ${r0(oLo)} to ${r0(oHi)} °C outside); the vents opened only slightly, to keep humidity at the ${r0(L.rh_max)} % limit.`;
+    return `No need — on ${when} the greenhouse never got too warm (indoor highest ${f1(hi)} °C while it was ${r0(oLo)} to ${r0(oHi)} °C outdoors); the vents opened only slightly, to keep humidity at the ${r0(L.rh_max)} % limit.`;
   }
   if (has("heat")) {
     const a = tAt(idx[0]).getTime(), b = tAt(idx[idx.length - 1]).getTime();
@@ -276,14 +276,14 @@ function quickAnswer(q) {
     if (has("why", "up", "rise", "increase", "high") && ups.length) {
       const f = ups.reduce((x, y) => (y.ch > x.ch ? y : x));
       const tmin = Math.min(...idx.map((i) => d.Tmin[i]));
-      return `Heating rose from ${r0(f.a)} to ${r0(f.b)} W/m² between ${f.s.slice(11)} and ${f.e.slice(11)}${f.df < 0.5 ? " overnight" : ""} because it was ${r0(f.oe)} °C outside and the controller had to keep the greenhouse at its ${r0(tmin)} °C minimum.`;
+      return `Heating rose from ${r0(f.a)} to ${r0(f.b)} W/m² between ${f.s.slice(11)} and ${f.e.slice(11)}${f.df < 0.5 ? " overnight" : ""} because it was ${r0(f.oe)} °C outdoors and the controller had to keep the greenhouse at its ${r0(tmin)} °C minimum.`;
     }
-    return `On ${when} heating used ${f2(kwh)} kWh/m² (${f2(cad)} CAD/m²), averaging ${r0(sum(idx.map((i) => d.H[i])) / idx.length)} W/m² while it was ${r0(oLo)} to ${r0(oHi)} °C outside.`;
+    return `On ${when} heating used ${f2(kwh)} kWh/m² (${f2(cad)} CAD/m²), averaging ${r0(sum(idx.map((i) => d.H[i])) / idx.length)} W/m² while it was ${r0(oLo)} to ${r0(oHi)} °C outdoors.`;
   }
-  if (has("humid", "moist")) return `On ${when} humidity inside reached ${r0(Math.max(...idx.map((i) => d.RH[i])))} % (outside it was ${span(...minmax("RHo", idx))} %); it sat at the ${r0(L.rh_max)} % limit for ${f1(rhH)} h and the controller held it there with small vent openings.`;
+  if (has("humid", "moist")) return `On ${when} indoor humidity reached ${r0(Math.max(...idx.map((i) => d.RH[i])))} % (outdoor ${span(...minmax("RHo", idx))} %); it sat at the ${r0(L.rh_max)} % limit for ${f1(rhH)} h and the controller held it there with small vent openings.`;
   if (has("co2", "co₂", "carbon")) {
     const c = idx.map((i) => d.CO2[i]);
-    return `On ${when} CO₂ inside ranged ${r0(Math.min(...c))}–${r0(Math.max(...c))} ppm (outside about ${r0(S.meta.co2_out_ppm)} ppm): the controller added ${r0(sum(idx.map((i) => d.C[i])) * DT / 1000)} g/m² in daylight, when it helps the lettuce grow.`;
+    return `On ${when} indoor CO₂ ranged ${r0(Math.min(...c))}–${r0(Math.max(...c))} ppm (outdoor ${span(...minmax("CO2o", idx))} ppm): the controller added ${r0(sum(idx.map((i) => d.C[i])) * DT / 1000)} g/m² in daylight, when it helps the lettuce grow.`;
   }
   if (has("grow", "harvest", "yield", "weight", "lettuce")) {
     const last = idx[idx.length - 1];
@@ -291,13 +291,13 @@ function quickAnswer(q) {
   }
   if (has("cost", "money", "price", "energy", "gas")) return `On ${when} heating cost ${f2(cad)} CAD/m² (${f2(kwh)} kWh/m²) and CO₂ ${(sum(idx.map((i) => d.C[i])) * DT * 1e-6 * S.meta.prices.co2_cad_per_kg).toFixed(3)} CAD/m².`;
   if (!above.length && !below.length)
-    return `Yes — on ${when} the greenhouse stayed within its limits at ${r0(lo)}–${r0(hi)} °C (allowed ${L.t_night[0]}–${L.t_night[1]} °C at night, ${L.t_day[0]}–${L.t_day[1]} °C by day) while it was ${r0(oLo)} to ${r0(oHi)} °C outside.`;
+    return `Yes — on ${when} the greenhouse stayed within its limits at ${r0(lo)}–${r0(hi)} °C indoors (allowed ${L.t_night[0]}–${L.t_night[1]} °C at night, ${L.t_day[0]}–${L.t_day[1]} °C by day) while it was ${r0(oLo)} to ${r0(oHi)} °C outdoors.`;
   const parts = [];
   if (above.length) {
     const ex = above.map((i) => d.T[i] - d.Tmax[i]), w = above[ex.indexOf(Math.max(...ex))];
     const warmOutside = above.filter((i) => d.To[i] > d.Tmax[i]).length > above.length / 2;
     parts.push(`too warm for ${f1(above.length * 0.25)} h (worst ${f1(Math.max(...ex))} °C over the limit around ${tf(w)})` +
-      (warmOutside ? ", mostly because it was warmer outside than the limit, which vents cannot fix" : ", even with the vents open"));
+      (warmOutside ? ", mostly because it was warmer outdoors than the limit, which vents cannot fix" : ", even with the vents open"));
   }
   if (below.length) {
     const de = below.map((i) => d.Tmin[i] - d.T[i]), w = below[de.indexOf(Math.max(...de))];
@@ -323,7 +323,7 @@ function quickContext(q) {
 }
 
 // ---------------- Gemini (optional, called directly from the browser)
-const FAST_SYSTEM = "You answer greenhouse growers in one or two short sentences (at most 40 words). Use only the facts given in the message; keep every number and unit exactly as given; never add numbers. Use plain words, no jargon. If the facts do not answer the question, say briefly what the data shows instead. Answer in the language of the question. The data comes from a greenhouse simulation.";
+const FAST_SYSTEM = "You answer greenhouse growers in one or two short sentences (at most 40 words). Use only the facts given in the message; keep every number and unit exactly as given; never add numbers. Use plain words, no jargon. If the facts do not answer the question, say briefly what the data shows instead. Say 'indoor' and 'outdoor' (not inside/outside). Answer in the language of the question. The data comes from a greenhouse simulation.";
 const SKIP = ["image", "tts", "audio", "live", "embedding", "robotics", "computer", "native", "learnlm", "gemma"];
 
 function rankModels(names) {

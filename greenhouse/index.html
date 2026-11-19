@@ -55,11 +55,11 @@
       <section class="tab active" id="tab-summary">
         <h2 id="sum-title">Summary</h2>
         <div class="card">
-          <h3 class="flush">Inside vs outside</h3>
+          <h3 class="flush">Indoor vs outdoor</h3>
           <div id="compare"></div>
           <p class="muted tiny" id="compare-note"></p>
         </div>
-        <h3>What the controller used (inside)</h3>
+        <h3>What the controller used (indoor)</h3>
         <div class="metrics" id="metrics"></div>
         <h3>What the controller did</h3>
         <div id="daily"></div>
@@ -71,17 +71,19 @@
 
       <section class="tab" id="tab-charts">
         <p class="muted" id="chart-note"></p>
-        <h3>Temperature (°C) <span class="muted">· band = allowed inside range</span></h3>
+        <h3>Temperature (°C) <span class="muted">· band = allowed indoor range</span></h3>
         <div class="chart"><canvas id="c-temp"></canvas></div>
-        <h3>Humidity (%) <span class="muted">· dashed = inside maximum</span></h3>
+        <h3>Humidity (%) <span class="muted">· dashed = indoor maximum</span></h3>
         <div class="chart small"><canvas id="c-rh"></canvas></div>
         <h3>CO₂ (ppm)</h3>
         <div class="chart small"><canvas id="c-co2"></canvas></div>
-        <h3>Sunlight (W/m²) <span class="muted">· measured outside</span></h3>
+        <h3>Outdoor CO₂ (ppm) <span class="muted">· zoomed in</span></h3>
+        <div class="chart small"><canvas id="c-co2o"></canvas></div>
+        <h3>Sunlight (W/m²) <span class="muted">· outdoor</span></h3>
         <div class="chart small"><canvas id="c-sun"></canvas></div>
-        <h3>Heating (W/m²) <span class="muted">· controller, inside</span></h3>
+        <h3>Heating (W/m²) <span class="muted">· controller, indoor</span></h3>
         <div class="chart small"><canvas id="c-heat"></canvas></div>
-        <h3>Vents (mm/s) <span class="muted">· controller, inside</span></h3>
+        <h3>Vents (mm/s) <span class="muted">· controller, indoor</span></h3>
         <div class="chart small"><canvas id="c-vent"></canvas></div>
       </section>
 
