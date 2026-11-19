@@ -403,6 +403,15 @@ input[type="range"] { width: 100%; accent-color: var(--red); }
 .chart-totals { margin-left: auto; font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .chart-totals b { color: var(--fg); }
 .chart-box { position: relative; height: 190px; }
+.chart-row { display: flex; gap: 16px; align-items: stretch; }
+.chart-row > .chart-box:first-child { flex: 1 1 auto; min-width: 0; }
+.chart-family { flex: 0 0 230px; display: flex; flex-direction: column; border-left: 1px solid var(--line); padding-left: 14px; }
+.chart-family-title { font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 2px; }
+.chart-family-box { position: relative; flex: 1 1 auto; min-height: 0; }
+@media (max-width: 760px) {
+  .chart-row { flex-direction: column; }
+  .chart-family { flex-basis: 190px; border-left: 0; padding-left: 0; border-top: 1px solid var(--line); padding-top: 8px; }
+}
 
 /* ---------- leaflet bits ---------- */
 .leaflet-container { font-family: var(--font); }
@@ -474,6 +483,13 @@ input[type="range"] { width: 100%; accent-color: var(--red); }
 .modal-body h2 { font-size: 19px; margin-bottom: 10px; }
 .modal-body li { margin: 6px 0; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.about h3 { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 18px 0 6px; }
+.about p { margin: 0 0 8px; line-height: 1.5; }
+.about ul { margin: 0; padding-left: 18px; }
+.about li { margin: 4px 0; line-height: 1.45; }
+.about-lead { font-size: 15px; }
+.about .chip { font-size: 10.5px; padding: 1px 7px; vertical-align: 1px; }
+.about-foot { margin-top: 18px !important; padding-top: 10px; border-top: 1px solid var(--line); }
 .an-fields { display: grid; gap: 12px; margin: 14px 0 6px; }
 .an-fields select, .an-fields input { width: 100%; }
 input[type="number"] {

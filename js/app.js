@@ -46,8 +46,14 @@
   const family = (d) => (Math.abs(d) % 2 === 1 ? "ODD" : "EVEN");
   const dname = (d) => "D" + String(d).padStart(2, "0");
   const fmtInt = (n) => Math.round(n).toLocaleString("en-US");
-  const fmtArea = (a) => fmtInt(a) + " m²";
   const fmt1 = (n) => (Math.round(n * 10) / 10).toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  // Areas are kept in m² inside and shown in square feet; lengths in feet.
+  const FT2_PER_M2 = 1 / (0.3048 * 0.3048);
+  const FT_PER_M = 1 / 0.3048;
+  const ft2 = (a) => a * FT2_PER_M2;
+  const fmtArea = (a) => fmtInt(ft2(a)) + " ft²";
+  const fmtFt = (m) => fmtInt(m * FT_PER_M) + " ft";
+  const fmtFt1 = (m) => fmt1(m * FT_PER_M) + " ft";
 
   function toast(message, kind = "", ms = 3200) {
     const el = $("toast");
@@ -222,7 +228,7 @@
   }
 
   // ------------------------------------------------------------------ map
-  let map, renderers, layers, chart;
+  let map, renderers, layers, chart, familyChart;
 
   function initMap() {
     map = L.map("map", {
@@ -266,7 +272,7 @@
     for (const key of ["image", "crowns", "labels", "start", "select", "draw"]) layers[key].addTo(map);
     for (const f of ["EVEN", "ODD"]) { layers.lines[f].addTo(map); layers.arrows[f].addTo(map); }
 
-    L.control.scale({ imperial: false, position: "bottomleft", maxWidth: 160 }).addTo(map);
+    L.control.scale({ imperial: true, metric: false, position: "bottomleft", maxWidth: 160 }).addTo(map);
 
     const North = L.Control.extend({
       options: { position: "topright" },
@@ -1017,6 +1023,7 @@
     state.lattice = buildLattice(settings);
 
     // Drone image.
+    state.previewBounds = preview ? preview.bounds : null;
     if (preview) {
       state.previewUrl = preview.url;
       L.imageOverlay(preview.url, preview.bounds, { pane: "image", interactive: false }).addTo(layers.image);
@@ -1096,7 +1103,7 @@
 
   function crownTip(c) {
     const f = c.excluded ? "not pecan" : family(c.diagonal);
-    return `<strong>${c.id}</strong> · ${dname(c.diagonal)} ${f}<br>${fmt1(c.area)} m²`;
+    return `<strong>${c.id}</strong> · ${dname(c.diagonal)} ${f}<br>${fmtArea(c.area)}`;
   }
 
   function makeCrownLayer(c) {
@@ -1402,10 +1409,10 @@
     ];
     if (field > 0) facts.push(["Canopy cover", `${pct(t.all.area, field)} → ${pct(keep.area, field)}`]);
     const hr = meanHeight(fam), hk = meanHeight(other);
-    if (hr !== null && hk !== null) facts.push(["Height removed / left", `${fmt1(hr)} / ${fmt1(hk)} m`]);
+    if (hr !== null && hk !== null) facts.push(["Height removed / left", `${fmtInt(hr * FT_PER_M)} / ${fmtFt(hk)}`]);
     if (ds.in_row_spacing_m) {
       const after = 2 * ds.in_row_spacing_m;
-      facts.push(["Spacing in row after", `${fmt1(after)} m · ${Math.round(after / 0.3048)} ft`]);
+      facts.push(["Spacing in row after", fmtFt(after)]);
     }
     facts.push(["Diagonals to remove", String(rem.diagonals)]);
     $("plan-facts").innerHTML = facts.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join("");
@@ -1453,10 +1460,12 @@
         : `${rc.bad.length} of ${fmtInt(rc.pairs)} row neighbours share a colour.`, rc.bad.length ? "Show" : ""]
       : [null, "No row positions in these results (older notebook version).", ""]);
     items.push([!!el.used, el.used
-      ? `Elevation (DSM) used${el.file ? ` (${el.file})` : el.path ? ` (${String(el.path).split(/[\\/]/).pop()})` : ""}: grass and weeds lower than 1 m are not counted; treetops from tree height.`
+      ? `Elevation (DSM) used${el.file ? ` (${el.file})` : el.path ? ` (${String(el.path).split(/[\\/]/).pop()})` : ""}: grass and weeds lower than 3 ft are not counted (young trees on their planting position are); treetops from tree height.`
       : `No elevation (DSM)${el.reason ? `: ${el.reason}` : ""}. Add the DSM of the same flight for the most accurate canopy.`, ""]);
     if (Number.isFinite(ds.crowns_crossed_by_their_diagonal)) items.push([ds.crowns_crossed_by_their_diagonal >= 0.97, `${fmt1(100 * ds.crowns_crossed_by_their_diagonal)} % of crowns are crossed by their own diagonal line.`, ""]);
     items.push([offGrid === 0 ? true : null, offGrid ? `${fmtInt(offGrid)} crown${offGrid === 1 ? "" : "s"} off the planting grid (flag OFF_GRID): worth a look.` : "Every crown sits on the planting grid.", ""]);
+    const young = [...state.crowns.values()].filter((c) => !c.removed && !c.excluded && /YOUNG_TREE/.test((c.props && c.props.review_flags) || "")).length;
+    if (young) items.push([null, `${fmtInt(young)} young tree${young === 1 ? "" : "s"} counted on empty planting positions (flag YOUNG_TREE). Click one to check it; “Not a pecan” takes out a wrong one.`, ""]);
     const shadow = s.segmentation && s.segmentation.cast_shadow;
     if (shadow && Number.isFinite(shadow.shadow_removed_m2)) items.push([true, `Cast shadow trimmed from crown edges: ${fmtArea(shadow.shadow_removed_m2)}.`, ""]);
     $("checks-list").innerHTML = items.map(([ok, text, action]) =>
@@ -1486,7 +1495,7 @@
       list.sort((a, b) => polysCentroid(b.polys)[1] - polysCentroid(a.polys)[1]);
       list.forEach((c, k) => order.set(c.id, k + 1));
     }
-    const header = ["crown_id", "diagonal", "family", "tree_on_diagonal", "grid_row", "grid_tree", "canopy_m2", "height_top_m"];
+    const header = ["crown_id", "diagonal", "family", "tree_on_diagonal", "grid_row", "grid_tree", "canopy_ft2", "height_top_ft", "young_tree"];
     header.push(...(state.toLonLat ? ["longitude", "latitude"] : ["x_m", "y_m"]));
     const lines = [csvRow(header)];
     chosen.sort((a, b) => a.diagonal - b.diagonal || order.get(a.id) - order.get(b.id));
@@ -1494,8 +1503,9 @@
       const p = c.props || {};
       const [x, y] = polysCentroid(c.polys);
       const where = state.toLonLat ? state.toLonLat(x, y).map((v) => v.toFixed(8)) : [x.toFixed(2), y.toFixed(2)];
-      const height = p.height_top_m !== null && p.height_top_m !== undefined && p.height_top_m !== "" && Number.isFinite(Number(p.height_top_m)) ? Number(p.height_top_m).toFixed(2) : "";
-      lines.push(csvRow([c.id, dname(c.diagonal), fam, order.get(c.id), p.grid_row ?? "", p.grid_tree ?? "", c.area.toFixed(2), height, ...where]));
+      const height = p.height_top_m !== null && p.height_top_m !== undefined && p.height_top_m !== "" && Number.isFinite(Number(p.height_top_m)) ? (Number(p.height_top_m) * FT_PER_M).toFixed(1) : "";
+      const youngTree = /YOUNG_TREE/.test(p.review_flags || "") ? "yes" : "";
+      lines.push(csvRow([c.id, dname(c.diagonal), fam, order.get(c.id), p.grid_row ?? "", p.grid_tree ?? "", ft2(c.area).toFixed(1), height, youngTree, ...where]));
     }
     download(`${fileBase()}_trees_to_remove_${fam}.csv`, lines.join("\n") + "\n");
   }
@@ -1511,11 +1521,13 @@
       facts.push(["Analysis", elevationUsed ? "in this browser (image + DSM)" : "in this browser (image only)"]);
       facts.push(["Pixel size", `${fmt1(s.pixel_m * 100)} cm`]);
     }
-    if (ds.in_row_spacing_m) facts.push(["Tree spacing", `${fmt1(ds.in_row_spacing_m)} m × ${fmt1(ds.row_spacing_m)} m`]);
+    if (ds.in_row_spacing_m) facts.push(["Tree spacing", `${fmt1(ds.in_row_spacing_m * FT_PER_M)} × ${fmtFt1(ds.row_spacing_m)} (design 20 × 40 ft)`]);
     if (Number.isFinite(ds.row_bearing_deg)) facts.push(["Row bearing", `${Math.round(ds.row_bearing_deg)}°`]);
-    if (ds.diagonal_spacing_m) facts.push(["Diagonals", `${state.diagonals.size}, ${fmt1(ds.diagonal_spacing_m)} m apart`]);
+    if (ds.diagonal_spacing_m) facts.push(["Diagonals", `${state.diagonals.size}, ${fmtFt1(ds.diagonal_spacing_m)} apart`]);
     else facts.push(["Diagonals", String(state.diagonals.size)]);
-    if (s.field_area_m2) facts.push(["Field area", `${fmt1(s.field_area_m2 / 10000)} ha`]);
+    if (s.field_area_m2) facts.push(["Field area", `${fmt1(s.field_area_m2 / 4046.8564224)} acres · ${fmtArea(s.field_area_m2)}`]);
+    const youngCount = [...state.crowns.values()].filter((c) => /YOUNG_TREE/.test((c.props && c.props.review_flags) || "")).length;
+    if (youngCount) facts.push(["Young trees", fmtInt(youngCount)]);
     facts.push([s.source === "browser" ? "Crowns found" : "Crowns (notebook)", fmtInt(state.crowns.size)]);
     if (s.segmentation && s.segmentation.elevation) facts.push(["Elevation (DSM)", elevationUsed ? "used: tree heights" : "not used"]);
     $("field-facts").innerHTML = facts.map(([k, v]) => `<dt>${k}</dt><dd title="${String(v).replace(/"/g, "&quot;")}">${escapeHtml(String(v))}</dd>`).join("");
@@ -1536,7 +1548,7 @@
     const d = state.diagonals.get(state.start);
     const t = state.totals && state.totals.per.get(state.start);
     $("start-facts").innerHTML = d
-      ? `<strong>${dname(d.number)}</strong> (${d.family}) · ${t ? fmtInt(t.count) : 0} crown${t && t.count === 1 ? "" : "s"} · <strong>${fmtArea(t ? t.area : 0)}</strong> canopy · line ${fmtInt(d.length)} m. The arrow shows the direction of travel.`
+      ? `<strong>${dname(d.number)}</strong> (${d.family}) · ${t ? fmtInt(t.count) : 0} crown${t && t.count === 1 ? "" : "s"} · <strong>${fmtArea(t ? t.area : 0)}</strong> canopy · line ${fmtFt(d.length)}. The arrow shows the direction of travel.`
       : "No diagonal found.";
   }
 
@@ -1546,7 +1558,7 @@
     $("diag-table").tBodies[0].innerHTML = rows.map(([d, p]) => {
       const f = family(d).toLowerCase();
       const active = d === state.selectedDiagonal ? " class=\"active\"" : "";
-      return `<tr data-d="${d}"${active}><td><span class="dot ${f}"></span>${dname(d)}${d === state.start ? " ▶" : ""}</td><td>${fmtInt(p.count)}</td><td>${fmtInt(p.area)}</td></tr>`;
+      return `<tr data-d="${d}"${active}><td><span class="dot ${f}"></span>${dname(d)}${d === state.start ? " ▶" : ""}</td><td>${fmtInt(p.count)}</td><td>${fmtInt(ft2(p.area))}</td></tr>`;
     }).join("");
     const foot = [
       ["EVEN total", t.fam.EVEN.count, t.fam.EVEN.area],
@@ -1554,7 +1566,7 @@
       ["All", t.all.count, t.all.area],
     ];
     if (t.excluded.count) foot.push(["Not a pecan", t.excluded.count, t.excluded.area]);
-    $("diag-table").tFoot.innerHTML = foot.map(([k, n, a]) => `<tr><td>${k}</td><td>${fmtInt(n)}</td><td>${fmtInt(a)}</td></tr>`).join("");
+    $("diag-table").tFoot.innerHTML = foot.map(([k, n, a]) => `<tr><td>${k}</td><td>${fmtInt(n)}</td><td>${fmtInt(ft2(a))}</td></tr>`).join("");
   }
 
   function fillSelected() {
@@ -1567,8 +1579,9 @@
       chip.textContent = c.excluded ? "NOT PECAN" : family(c.diagonal);
       chip.className = "chip " + (c.excluded ? "excluded" : family(c.diagonal).toLowerCase());
       const p = c.props || {};
-      const facts = [["Canopy", fmt1(c.area) + " m²"]];
-      if (Number.isFinite(Number(p.height_top_m)) && p.height_top_m !== null) facts.push(["Tree height", fmt1(Number(p.height_top_m)) + " m"]);
+      const facts = [["Canopy", fmtArea(c.area)]];
+      if (Number.isFinite(Number(p.height_top_m)) && p.height_top_m !== null) facts.push(["Tree height", fmtFt1(Number(p.height_top_m))]);
+      if (/YOUNG_TREE/.test(p.review_flags || "")) facts.push(["Young tree", "yes (small crown on its planting position)"]);
       if (p.grid_row !== undefined && p.grid_row !== null) facts.push(["Row / tree", `${p.grid_row} / ${p.grid_tree}`]);
       if (c.origDiagonal !== null && c.origDiagonal !== c.diagonal) facts.push(["Notebook diagonal", dname(c.origDiagonal)]);
       if (c.members.length) facts.push(["Merged pieces", c.members.join(", ")]);
@@ -1598,7 +1611,7 @@
       $("seld-facts").innerHTML = [
         ["Crowns", fmtInt(t.count)],
         ["Canopy", fmtArea(t.area)],
-        ["Line length", fmtInt(d.length) + " m"],
+        ["Line length", fmtFt(d.length)],
       ].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
       $("seld-start").hidden = !d.pieces.length;
       $("seld-start").disabled = d.number === state.start;
@@ -1644,7 +1657,7 @@
         },
         scales: {
           x: { ticks: { color: tick, font: { size: 9 }, maxRotation: 90, minRotation: 90, autoSkip: true, autoSkipPadding: 2 }, grid: { display: false } },
-          y: { ticks: { color: tick, callback: (v) => fmtInt(v) }, grid: { color: grid }, title: { display: true, text: "Canopy (m²)", color: tick } },
+          y: { ticks: { color: tick, callback: (v) => fmtInt(v) }, grid: { color: grid }, title: { display: true, text: "Canopy (ft²)", color: tick } },
         },
         onClick: (_event, elements) => {
           if (elements.length) selectDiagonal(numbers[elements[0].index], true);
@@ -1652,17 +1665,65 @@
       },
     });
     chart.$numbers = numbers;
+
+    // EVEN vs ODD in total (ft²).
+    if (familyChart) familyChart.destroy();
+    familyChart = new Chart($("chart-family"), {
+      type: "bar",
+      data: {
+        labels: ["EVEN", "ODD"],
+        datasets: [{ data: [0, 0], backgroundColor: [COLORS.EVEN, COLORS.ODD], borderWidth: 0, barPercentage: 0.75, categoryPercentage: 0.9 }],
+      },
+      options: {
+        animation: false,
+        maintainAspectRatio: false,
+        layout: { padding: { top: 18 } },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: (item) => {
+                const f = item.dataIndex === 0 ? "EVEN" : "ODD";
+                const p = state.totals.fam[f];
+                return `${fmtArea(p.area)} · ${fmtInt(p.count)} trees · ${pct(p.area, state.totals.all.area)}`;
+              },
+            },
+          },
+        },
+        scales: {
+          x: { ticks: { color: tick, font: { weight: "600" } }, grid: { display: false } },
+          y: { beginAtZero: true, ticks: { color: tick, callback: (v) => fmtInt(v), maxTicksLimit: 5 }, grid: { color: grid }, title: { display: true, text: "ft²", color: tick } },
+        },
+      },
+      plugins: [{
+        id: "values",
+        afterDatasetsDraw(c) {
+          const { ctx: g } = c;
+          const meta = c.getDatasetMeta(0);
+          g.save();
+          g.fillStyle = tick;
+          g.font = "600 11px system-ui, sans-serif";
+          g.textAlign = "center";
+          meta.data.forEach((bar, k) => g.fillText(fmtInt(c.data.datasets[0].data[k]), bar.x, bar.y - 5));
+          g.restore();
+        },
+      }],
+    });
     updateChart();
   }
 
   function updateChart() {
     if (!chart) return;
     const numbers = chart.$numbers;
-    chart.data.datasets[0].data = numbers.map((d) => (state.totals.per.get(d) || { area: 0 }).area);
+    chart.data.datasets[0].data = numbers.map((d) => ft2((state.totals.per.get(d) || { area: 0 }).area));
     chart.data.datasets[0].backgroundColor = numbers.map((d) => (d === state.selectedDiagonal ? "#f2b600" : COLORS[family(d)]));
     chart.update("none");
     const t = state.totals;
     $("chart-totals").innerHTML = `EVEN <b>${fmtArea(t.fam.EVEN.area)}</b> · ODD <b>${fmtArea(t.fam.ODD.area)}</b> · All <b>${fmtArea(t.all.area)}</b>`;
+    if (familyChart) {
+      familyChart.data.datasets[0].data = [ft2(t.fam.EVEN.area), ft2(t.fam.ODD.area)];
+      familyChart.update("none");
+    }
   }
 
   // ------------------------------------------------------------------ selection
@@ -1784,7 +1845,7 @@
     commit({ t: "add", id, polys, area, diagonal });
     setMode("select");
     selectCrown(id);
-    toast(`Added ${id}: ${fmt1(area)} m² on ${dname(diagonal)} (${family(diagonal)}). Use ‹ › to change its diagonal.`, "", 5000);
+    toast(`Added ${id}: ${fmtArea(area)} on ${dname(diagonal)} (${family(diagonal)}). Use ‹ › to change its diagonal.`, "", 5000);
   }
 
   // Diagonal of a planting position, from the planting grid: the diagonal
@@ -2036,7 +2097,7 @@
     }
     commit({ t: "merge", keep: keep.id, drop: drop.id, polys, prevPolys: keep.polys, prevArea: keep.area, areaAfter: keep.area + drop.area });
     selectCrown(keep.id);
-    toast(`${drop.id} merged into ${keep.id}: ${fmt1(keep.area)} m² on ${dname(keep.diagonal)}.`);
+    toast(`${drop.id} merged into ${keep.id}: ${fmtArea(keep.area)} on ${dname(keep.diagonal)}.`);
   }
 
   // ------------------------------------------------------------------ export
@@ -2046,26 +2107,28 @@
 
   function exportDiagonals() {
     const t = state.totals;
-    const lines = [csvRow(["diagonal", "family", "crowns", "canopy_m2"])];
+    const lines = [csvRow(["diagonal", "family", "crowns", "canopy_ft2"])];
+    const f2 = (a) => ft2(a).toFixed(1);
     for (const [d, p] of [...t.per.entries()].filter(([d]) => state.diagonals.has(d)).sort((a, b) => a[0] - b[0])) {
-      lines.push(csvRow([dname(d), family(d), p.count, p.area.toFixed(2)]));
+      lines.push(csvRow([dname(d), family(d), p.count, f2(p.area)]));
     }
     lines.push("");
-    lines.push(csvRow(["EVEN total", "EVEN", t.fam.EVEN.count, t.fam.EVEN.area.toFixed(2)]));
-    lines.push(csvRow(["ODD total", "ODD", t.fam.ODD.count, t.fam.ODD.area.toFixed(2)]));
-    lines.push(csvRow(["ALL total", "EVEN + ODD", t.all.count, t.all.area.toFixed(2)]));
-    if (t.excluded.count) lines.push(csvRow(["Not a pecan (not counted)", "", t.excluded.count, t.excluded.area.toFixed(2)]));
+    lines.push(csvRow(["EVEN total", "EVEN", t.fam.EVEN.count, f2(t.fam.EVEN.area)]));
+    lines.push(csvRow(["ODD total", "ODD", t.fam.ODD.count, f2(t.fam.ODD.area)]));
+    lines.push(csvRow(["ALL total", "EVEN + ODD", t.all.count, f2(t.all.area)]));
+    if (t.excluded.count) lines.push(csvRow(["Not a pecan (not counted)", "", t.excluded.count, f2(t.excluded.area)]));
     download(fileBase() + "_canopy_per_diagonal.csv", lines.join("\n") + "\n");
   }
 
   function exportCrownsCsv() {
-    const lines = [csvRow(["crown_id", "diagonal", "family", "canopy_m2", "status", "source", "notebook_diagonal", "merged_pieces", "height_top_m", "top_x", "top_y"])];
+    const lines = [csvRow(["crown_id", "diagonal", "family", "canopy_ft2", "status", "source", "notebook_diagonal", "merged_pieces", "height_top_ft", "young_tree", "top_x", "top_y"])];
     for (const c of activeCrowns()) {
       const p = c.props || {};
+      const hgt = Number.isFinite(Number(p.height_top_m)) && p.height_top_m !== null && p.height_top_m !== "" ? (Number(p.height_top_m) * FT_PER_M).toFixed(1) : "";
       lines.push(csvRow([
-        c.id, dname(c.diagonal), family(c.diagonal), c.area.toFixed(2), c.excluded ? "not_pecan" : "pecan", c.source,
+        c.id, dname(c.diagonal), family(c.diagonal), ft2(c.area).toFixed(1), c.excluded ? "not_pecan" : "pecan", c.source,
         c.origDiagonal === null ? "" : dname(c.origDiagonal), c.members.join(" "),
-        p.height_top_m ?? "", p.top_x ?? "", p.top_y ?? "",
+        hgt, /YOUNG_TREE/.test(p.review_flags || "") ? "yes" : "", p.top_x ?? "", p.top_y ?? "",
       ]));
     }
     download(fileBase() + "_crowns_corrected.csv", lines.join("\n") + "\n");
@@ -2091,6 +2154,7 @@
         diagonal: c.diagonal,
         family: family(c.diagonal),
         area_m2: +c.area.toFixed(3),
+        area_ft2: +ft2(c.area).toFixed(2),
         status: c.excluded ? "not_pecan" : "pecan",
         source: c.source,
         notebook_diagonal: c.origDiagonal,
@@ -2110,6 +2174,230 @@
 
   function fileBase() {
     return (state.name || "pecan").replace(/[^\w.-]+/g, "_");
+  }
+
+  const canvasBlob = (canvas, type = "image/jpeg", quality = 0.92) =>
+    new Promise((resolve, reject) => canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("image too large"))), type, quality));
+
+  // Result map as a JPG of the whole field: drone image, crowns tinted EVEN /
+  // ODD, the wavy diagonals with arrows, the START line, the canopy (ft²) of
+  // every line and the totals underneath.
+  async function exportMapJpg() {
+    if (!state.loaded) return;
+    setLoading("Drawing the map image …");
+    await nextFrame();
+    try {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      const grow = (x, y) => { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; };
+      for (const c of state.crowns.values()) if (!c.removed) for (const poly of c.polys) for (const [x, y] of poly[0]) grow(x, y);
+      for (const d of state.diagonals.values()) for (const piece of d.pieces) for (const [x, y] of piece) grow(x, y);
+      if (!Number.isFinite(x0)) throw new Error("nothing to draw");
+      const pad = 8;
+      x0 -= pad; y0 -= pad; x1 += pad; y1 += pad;
+      const wM = x1 - x0, hM = y1 - y0;
+      const maxSide = 6000, maxPixels = 28e6;
+      let s = maxSide / Math.max(wM, hM);
+      if (wM * hM * s * s > maxPixels) s = Math.sqrt(maxPixels / (wM * hM));
+      const W = Math.round(wM * s), Hmap = Math.round(hM * s);
+      const unit = Math.max(W, Hmap) / 1000;  // text and line sizes follow the image size
+      const footer = Math.round(150 * unit);
+      const canvas = document.createElement("canvas");
+      canvas.width = W; canvas.height = Hmap + footer;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const X = (x) => (x - x0) * s, Y = (y) => (y1 - y) * s;
+
+      // Drone image.
+      if (state.previewUrl && state.previewBounds && $("layer-image").checked) {
+        const img = new Image();
+        img.src = state.previewUrl;
+        await img.decode();
+        const [[by0, bx0], [by1, bx1]] = state.previewBounds;
+        ctx.drawImage(img, X(bx0), Y(by1), (bx1 - bx0) * s, (by1 - by0) * s);
+      }
+
+      // Crowns.
+      ctx.lineJoin = "round";
+      for (const c of state.crowns.values()) {
+        if (c.removed) continue;
+        ctx.beginPath();
+        for (const poly of c.polys) for (const ring of poly) ring.forEach(([x, y], k) => (k ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y))));
+        ctx.globalAlpha = c.excluded ? 0.35 : Math.max(0.35, state.fillOpacity);
+        ctx.fillStyle = c.excluded ? EXCLUDED_COLOR : COLORS[family(c.diagonal)];
+        ctx.fill("evenodd");
+        ctx.globalAlpha = 0.9;
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = Math.max(0.6, 0.12 * s);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+
+      // Diagonals with arrows, then the START line on top.
+      const lineW = Math.max(1.2, 0.3 * s);
+      const drawLine = (piece, colour, width) => {
+        ctx.beginPath();
+        piece.forEach(([x, y], k) => (k ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y))));
+        ctx.lineCap = "round";
+        ctx.strokeStyle = "#ffffff"; ctx.lineWidth = width * 2; ctx.stroke();
+        ctx.strokeStyle = colour; ctx.lineWidth = width; ctx.stroke();
+      };
+      const drawArrow = (end, colour, length) => {
+        const [x, y] = end.tip, [dx, dy] = end.dir, wdt = 0.5 * length;
+        const bx = x - dx * length, by = y - dy * length;
+        ctx.beginPath();
+        ctx.moveTo(X(x), Y(y));
+        ctx.lineTo(X(bx - dy * wdt), Y(by + dx * wdt));
+        ctx.lineTo(X(bx + dy * wdt), Y(by - dx * wdt));
+        ctx.closePath();
+        ctx.fillStyle = colour; ctx.fill();
+        ctx.strokeStyle = "#ffffff"; ctx.lineWidth = Math.max(1, 0.1 * s); ctx.stroke();
+      };
+      const shown = (d) => d.pieces.length && $(d.family === "EVEN" ? "layer-even" : "layer-odd").checked && !state.startOnly;
+      for (const d of state.diagonals.values()) {
+        if (!shown(d)) continue;
+        for (const piece of d.pieces) drawLine(piece, LINE_COLORS[d.family], lineW);
+        if (d.end) drawArrow(d.end, LINE_COLORS[d.family], 3.5);
+      }
+      // Canopy (ft²) at the end of every line.
+      const pitch = (state.summary && state.summary.diagonal_settings && state.summary.diagonal_settings.diagonal_spacing_m) || 5.4;
+      const fontPx = Math.max(9, Math.min(40, 0.55 * pitch * s));
+      ctx.font = `600 ${fontPx}px system-ui, sans-serif`;
+      ctx.textBaseline = "middle";
+      for (const d of state.diagonals.values()) {
+        if (!shown(d) || !d.end) continue;
+        const t = state.totals.per.get(d.number) || { area: 0 };
+        const [ax, ay] = labelAxis(d.end);
+        const px = X(d.end.tip[0] + ax * 1.6), py = Y(d.end.tip[1] + ay * 1.6);
+        let angle = Math.atan2(-ay, ax);
+        let align = "left";
+        if (Math.abs(angle) > Math.PI / 2) { angle -= Math.sign(angle) * Math.PI; align = "right"; }
+        ctx.save();
+        ctx.translate(px, py);
+        ctx.rotate(angle);
+        ctx.textAlign = align;
+        ctx.lineWidth = Math.max(2, fontPx / 4);
+        ctx.strokeStyle = "rgba(255,255,255,0.92)";
+        ctx.strokeText(fmtArea(t.area), 0, 0);
+        ctx.fillStyle = LINE_COLORS[d.family];
+        ctx.fillText(fmtArea(t.area), 0, 0);
+        ctx.restore();
+      }
+      const start = state.diagonals.get(state.start);
+      if (start && start.pieces.length) {
+        for (const piece of start.pieces) drawLine(piece, LINE_COLORS[start.family], 2.4 * lineW);
+        if (start.end) drawArrow(start.end, LINE_COLORS[start.family], 8);
+        const top = diagonalTop(start);
+        if (top) {
+          const text = `START ${dname(start.number)} (${start.family})`;
+          ctx.font = `700 ${Math.round(22 * unit)}px system-ui, sans-serif`;
+          const tw = ctx.measureText(text).width, th = 30 * unit;
+          let bx = X(top[0]) - tw - 24 * unit, by = Y(top[1]) - th - 14 * unit;
+          bx = Math.max(6, Math.min(W - tw - 22 * unit, bx)); by = Math.max(6, by);
+          ctx.fillStyle = "rgba(255,255,255,0.95)"; ctx.strokeStyle = "#263747"; ctx.lineWidth = 2 * unit;
+          ctx.fillRect(bx, by, tw + 16 * unit, th); ctx.strokeRect(bx, by, tw + 16 * unit, th);
+          ctx.fillStyle = "#1a2a36"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+          ctx.fillText(text, bx + 8 * unit, by + th / 2);
+        }
+      }
+
+      // Footer: title, legend, totals, start, scale bar.
+      const t = state.totals;
+      const fy = Hmap;
+      ctx.fillStyle = "#ffffff"; ctx.fillRect(0, fy, W, footer);
+      ctx.fillStyle = "#e3e7e4"; ctx.fillRect(0, fy, W, Math.max(1, unit));
+      const left = 24 * unit;
+      ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+      ctx.fillStyle = "#16241c";
+      ctx.font = `700 ${Math.round(26 * unit)}px system-ui, sans-serif`;
+      ctx.fillText(`${state.name || "Pecan orchard"} · EVEN / ODD diagonal thinning`, left, fy + 38 * unit);
+      ctx.font = `500 ${Math.round(19 * unit)}px system-ui, sans-serif`;
+      const youngN = [...state.crowns.values()].filter((c) => !c.removed && !c.excluded && /YOUNG_TREE/.test((c.props && c.props.review_flags) || "")).length;
+      const rows = [
+        [COLORS.EVEN, `EVEN (blue): ${fmtArea(t.fam.EVEN.area)} · ${fmtInt(t.fam.EVEN.count)} trees`],
+        [COLORS.ODD, `ODD (red): ${fmtArea(t.fam.ODD.area)} · ${fmtInt(t.fam.ODD.count)} trees`],
+        [null, `All: ${fmtArea(t.all.area)} · ${fmtInt(t.all.count)} trees${youngN ? ` (${fmtInt(youngN)} young)` : ""}${start ? ` · Thinning starts on ${dname(start.number)} (${start.family})` : ""}`],
+      ];
+      rows.forEach(([colour, text], k) => {
+        const ty = fy + (72 + 28 * k) * unit;
+        let tx = left;
+        if (colour) { ctx.fillStyle = colour; ctx.fillRect(tx, ty - 15 * unit, 16 * unit, 16 * unit); tx += 24 * unit; }
+        ctx.fillStyle = "#16241c";
+        ctx.fillText(text, tx, ty);
+      });
+      // Scale bar in feet.
+      const targetM = Math.max(wM / 6, 10);
+      const ft = [50, 100, 200, 250, 500, 1000, 2000].reduce((b, v) => (Math.abs(v * 0.3048 - targetM) < Math.abs(b * 0.3048 - targetM) ? v : b), 100);
+      const barW = ft * 0.3048 * s;
+      const sx = W - barW - 30 * unit, sy = fy + 100 * unit;
+      ctx.fillStyle = "#16241c";
+      ctx.fillRect(sx, sy, barW, 7 * unit);
+      ctx.textAlign = "center";
+      ctx.font = `600 ${Math.round(18 * unit)}px system-ui, sans-serif`;
+      ctx.fillText(`${fmtInt(ft)} ft`, sx + barW / 2, sy - 10 * unit);
+      ctx.font = `500 ${Math.round(14 * unit)}px system-ui, sans-serif`;
+      ctx.fillStyle = "#5e6a63";
+      ctx.textAlign = "right";
+      ctx.fillText(`North up · ${new Date().toISOString().slice(0, 10)} · emmanueldashboard.github.io`, W - 30 * unit, sy + 34 * unit);
+
+      const blob = await canvasBlob(canvas);
+      await download(fileBase() + "_thinning_map.jpg", blob, "image/jpeg");
+    } finally {
+      setLoading("");
+    }
+  }
+
+  // EVEN vs ODD total canopy (ft²) and trees, as a JPG chart.
+  async function exportFamilyChart() {
+    if (!state.loaded) return;
+    const t = state.totals;
+    const W = 1400, H = 1000;
+    const canvas = document.createElement("canvas");
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#16241c"; ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+    ctx.font = "700 40px system-ui, sans-serif";
+    ctx.fillText("EVEN vs ODD: total canopy", W / 2, 70);
+    ctx.font = "500 24px system-ui, sans-serif";
+    ctx.fillStyle = "#5e6a63";
+    ctx.fillText(state.name || "", W / 2, 110);
+    const fams = ["EVEN", "ODD"];
+    const vals = fams.map((f) => ft2(t.fam[f].area));
+    const top = Math.max(...vals, 1) * 1.18;
+    const base = H - 200, plotH = base - 190, barW = 300;
+    const xs = [W / 2 - 260, W / 2 + 260];
+    // grid lines
+    ctx.strokeStyle = "#e7ebe8"; ctx.lineWidth = 2; ctx.fillStyle = "#7a857e"; ctx.font = "500 20px system-ui, sans-serif"; ctx.textAlign = "right";
+    const step = Math.pow(10, Math.floor(Math.log10(top / 4)));
+    const tick = [1, 2, 2.5, 5, 10].map((m) => m * step).find((v) => top / v <= 6) || step * 10;
+    for (let v = 0; v <= top; v += tick) {
+      const y = base - (v / top) * plotH;
+      ctx.beginPath(); ctx.moveTo(150, y); ctx.lineTo(W - 80, y); ctx.stroke();
+      ctx.fillText(fmtInt(v), 140, y + 7);
+    }
+    ctx.save(); ctx.translate(48, base - plotH / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = "center"; ctx.fillText("Canopy (ft²)", 0, 0); ctx.restore();
+    const total = vals[0] + vals[1];
+    fams.forEach((f, k) => {
+      const h = (vals[k] / top) * plotH;
+      ctx.fillStyle = COLORS[f];
+      ctx.fillRect(xs[k] - barW / 2, base - h, barW, h);
+      ctx.fillStyle = "#16241c"; ctx.textAlign = "center";
+      ctx.font = "700 34px system-ui, sans-serif";
+      ctx.fillText(`${fmtInt(vals[k])} ft²`, xs[k], base - h - 52);
+      ctx.font = "500 24px system-ui, sans-serif";
+      ctx.fillText(`${fmtInt(t.fam[f].count)} trees · ${total ? fmt1((100 * vals[k]) / total) : "0.0"} %`, xs[k], base - h - 18);
+      ctx.font = "700 30px system-ui, sans-serif";
+      ctx.fillText(f === "EVEN" ? "EVEN (blue)" : "ODD (red)", xs[k], base + 44);
+    });
+    ctx.strokeStyle = "#16241c"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(150, base); ctx.lineTo(W - 80, base); ctx.stroke();
+    const smaller = vals[1] <= vals[0] ? "ODD" : "EVEN";
+    ctx.font = "500 24px system-ui, sans-serif"; ctx.fillStyle = "#16241c";
+    ctx.fillText(`All: ${fmtInt(total)} ft² · ${fmtInt(t.all.count)} trees · difference ${fmtInt(Math.abs(vals[0] - vals[1]))} ft² · smaller canopy: ${smaller}`, W / 2, base + 100);
+    ctx.fillStyle = "#5e6a63"; ctx.font = "500 20px system-ui, sans-serif";
+    ctx.fillText(`Thinning starts on ${dname(state.start)} (${family(state.start)}) · emmanueldashboard.github.io · ${new Date().toISOString().slice(0, 10)}`, W / 2, base + 145);
+    await download(fileBase() + "_EVEN_vs_ODD_total.jpg", await canvasBlob(canvas), "image/jpeg");
   }
 
   // ------------------------------------------------------------------ wiring
@@ -2146,6 +2434,8 @@
       if (kind === "plan") exportPlan();
       if (kind === "crowns-geojson") exportGeoJson();
       if (kind === "log") exportLog();
+      if (kind === "map-jpg") exportMapJpg().catch((err) => { console.error(err); toast("The map image could not be made: " + (err.message || err), "error", 6000); });
+      if (kind === "family-chart") exportFamilyChart();
       if (kind === "print") window.print();
     });
 

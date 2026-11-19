@@ -34,6 +34,8 @@
           <button type="button" role="menuitem" data-export="diagonals">Canopy per diagonal (CSV, totals at the end)</button>
           <button type="button" role="menuitem" data-export="crowns-csv">Crowns table (CSV)</button>
           <button type="button" role="menuitem" data-export="crowns-geojson">Corrected crowns (GeoJSON)</button>
+          <button type="button" role="menuitem" data-export="map-jpg">Result map image (JPG)</button>
+          <button type="button" role="menuitem" data-export="family-chart">EVEN vs ODD total chart (JPG)</button>
           <button type="button" role="menuitem" data-export="log">Corrections log (CSV)</button>
           <button type="button" role="menuitem" data-export="print">Print / save map as PDF</button>
         </div>
@@ -117,7 +119,7 @@
           <label class="switch"><input type="checkbox" id="layer-crowns" checked><span>Crowns</span></label>
           <label class="switch"><input type="checkbox" id="layer-even" checked><span>EVEN lines</span></label>
           <label class="switch"><input type="checkbox" id="layer-odd" checked><span>ODD lines</span></label>
-          <label class="switch"><input type="checkbox" id="layer-labels" checked><span>Canopy m² at line ends</span></label>
+          <label class="switch"><input type="checkbox" id="layer-labels" checked><span>Canopy ft² at line ends</span></label>
         </div>
         <label class="field slim">
           <span>Crown fill</span>
@@ -188,7 +190,7 @@
         </div>
         <div class="table-wrap">
           <table class="diag-table" id="diag-table">
-            <thead><tr><th scope="col">Diagonal</th><th scope="col">Crowns</th><th scope="col">Canopy m²</th></tr></thead>
+            <thead><tr><th scope="col">Diagonal</th><th scope="col">Crowns</th><th scope="col">Canopy ft²</th></tr></thead>
             <tbody></tbody>
             <tfoot></tfoot>
           </table>
@@ -234,7 +236,13 @@
           </div>
           <span class="chart-totals" id="chart-totals"></span>
         </div>
-        <div class="chart-box"><canvas id="chart" aria-label="Bar chart of canopy area per diagonal"></canvas></div>
+        <div class="chart-row">
+          <div class="chart-box"><canvas id="chart" aria-label="Bar chart of canopy area per diagonal"></canvas></div>
+          <div class="chart-box chart-family">
+            <div class="chart-family-title">EVEN vs ODD, total</div>
+            <div class="chart-family-box"><canvas id="chart-family" aria-label="Bar chart comparing the total EVEN and ODD canopy"></canvas></div>
+          </div>
+        </div>
       </section>
     </section>
   </main>
@@ -313,12 +321,36 @@
   </dialog>
 
   <dialog class="modal" id="about-modal">
-    <form method="dialog" class="modal-body">
-      <h2>About</h2>
-      <p>Emmanuel Dashboard for Pecan Thinning finds, in a drone image of a pecan orchard, the pecan canopy only (no grass, weeds, soil or shadow), one crown per planting position, and the EVEN / ODD thinning diagonals measured from the trees. It also opens the results of the pecan canopy notebook. Diagonal thinning removes alternate trees in each row and column, so every crown belongs to exactly one diagonal.</p>
-      <p>With the elevation (DSM) file, canopy height = DSM − terrain: only canopy at least 1 m tall counts as a tree, and clear cast shadow is trimmed from the crown edges. Along every row neighbouring crowns always alternate EVEN / ODD, also across a missing tree. Areas are in square metres. Added crowns are measured here, without the parts that other crowns already cover.</p>
-      <p class="muted small">Built with Leaflet, Chart.js, JSZip, proj4js and polygon-clipping.</p>
-      <div class="modal-actions"><button class="btn primary" value="close">Close</button></div>
+    <form method="dialog" class="modal-body about">
+      <h2>About this dashboard</h2>
+      <p class="about-lead">Plan the <strong>diagonal thinning</strong> of a pecan orchard from one drone flight. Diagonal thinning removes every other tree in each row and column, so every tree belongs to one of two families: <span class="chip even">EVEN</span> or <span class="chip odd">ODD</span>.</p>
+
+      <h3>What you get</h3>
+      <ul>
+        <li><strong>Pecan canopy only:</strong> no grass, weeds, soil or shadow.</li>
+        <li><strong>One crown per tree</strong>, tinted blue (EVEN) or red (ODD), <strong>young replanted trees included</strong>. Along every row the colours alternate, also across a missing tree.</li>
+        <li><strong>Canopy of every diagonal</strong>, and the EVEN, ODD and total canopy, in square feet (ft²).</li>
+        <li><strong>Where to start:</strong> the first line of the family with the smaller canopy.</li>
+        <li><strong>A thinning plan</strong> and the list of trees to remove with their GPS positions, for the field crew.</li>
+      </ul>
+
+      <h3>How it works</h3>
+      <ul>
+        <li>The canopy is found from the colour and texture of the image.</li>
+        <li>With the <strong>elevation (DSM) file</strong>, tree height = DSM − ground: only canopy at least 3 ft (1 m) tall counts, and clear cast shadow is trimmed from the crown edges.</li>
+        <li>The planting grid (20 × 40 ft design) is measured from the treetops, and the diagonals follow it.</li>
+        <li><strong>Young trees</strong> are too small and too low for those rules, so a small, round, sunlit crown as green as the pecan leaves that stands on an <em>empty planting position</em> of a row is counted as a young tree (flag YOUNG_TREE). Grass, weeds and shadow between the rows are not on a planting position and are not counted.</li>
+        <li>A crown you add is measured without the parts other crowns already cover.</li>
+      </ul>
+
+      <h3>Your files stay with you</h3>
+      <p>Images are analysed in this browser and never uploaded. Your corrections are saved in this browser until you click <em>Reset all</em>.</p>
+
+      <h3>Same results on Kaggle</h3>
+      <p>The <a href="notebook/Pecan_Canopy_Only_FIXED.ipynb" download>pecan canopy notebook</a> runs this dashboard's engine: the same image, DSM and Detail give exactly the same crowns and canopy. Drop its results ZIP here to open them.</p>
+
+      <p class="muted small about-foot">Built with Leaflet, Chart.js, JSZip, proj4js, polygon-clipping and geotiff.js.</p>
+      <div class="modal-actions"><button class="btn primary" value="close" autofocus>Close</button></div>
     </form>
   </dialog>
 

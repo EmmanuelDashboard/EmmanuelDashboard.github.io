@@ -13,7 +13,10 @@
  *      or crown centres with the image only);
  *   6. planting grid measured from the treetops; grid position of every
  *      crown; one crown per planting position (a crown is never cut in two);
- *   7. EVEN / ODD diagonals as wavy lines through the crowns; along every row
+ *   7. young (replanted) trees: a small, round, sunlit crown as green as the
+ *      pecan leaves, standing on an EMPTY planting position on bare ground,
+ *      becomes a crown (flag YOUNG_TREE) although it is under 2 m² / 1 m;
+ *   8. EVEN / ODD diagonals as wavy lines through the crowns; along every row
  *      neighbouring crowns always alternate (1 blue, 2 red ...), also across
  *      a missing tree.
  * Input: RGBA pixels on a square grid of `pixel` metres (north up), and
@@ -1189,6 +1192,10 @@
     P = gauss(P, w, h, 0.2 / pixel);
     let mask = new Uint8Array(n);
     for (let i = 0; i < n; i++) mask[i] = valid[i] && P[i] >= 0.5 ? 1 : 0;
+    // Young trees: their canopy pieces are smaller than 2 m² and lower than
+    // 1 m in the DSM, so the steps below drop them. They are kept aside and
+    // count only where they stand on an empty planting position.
+    const small = opts.youngTrees === false ? null : closing(mask, w, h, 0.25 / pixel);
     mask = closing(mask, w, h, 0.25 / pixel);
     mask = opening(mask, w, h, 0.2 / pixel);
     mask = fillSmallHoles(mask, w, h, Math.round(4.0 / area));
@@ -1207,9 +1214,11 @@
     P = null;
 
     let shadowRemoved = 0;
+    const trimmedAway = new Uint8Array(n);
     if (opts.removeShadow !== false) {
       await step("Trimming shadow from the crown edges …");
       const trimmed = trimShadow(rgba, mask, valid, chm, w, h, pixel, thresholds.darkY);
+      for (let i = 0; i < n; i++) trimmedAway[i] = mask[i] && !trimmed.mask[i] ? 1 : 0;
       mask = trimmed.mask; shadowRemoved = trimmed.removed_m2;
     }
 
@@ -1423,6 +1432,148 @@
         }
       }
     }
+
+    // Young trees (replants): a compact green canopy piece that the size or
+    // height rules dropped, standing on an EMPTY planting position of a row,
+    // is a young tree. It becomes a crown (flag YOUNG_TREE), so it is counted
+    // and takes its place in the EVEN / ODD alternation.
+    if (small) {
+      await step("Young trees on empty planting positions …");
+      const I = inv2(a, b);
+      const occupied = new Set();
+      const rowRange = new Map();
+      const refs = [];
+      for (let t = 0; t < count; t++) {
+        if (!pos[t] || !alive[t]) continue;
+        occupied.add(siteOf(pos[t]));
+        refs.push(t);
+        const [i, j] = pos[t], r = rowRange.get(j);
+        rowRange.set(j, r ? [Math.min(r[0], i), Math.max(r[1], i)] : [i, i]);
+      }
+      for (const e of extra) occupied.add(siteOf(e.pos));
+      const cellM = 2 * Math.max(inRow, len(b));
+      const buckets = new Map();
+      for (const t of refs) {
+        const k = Math.floor(pts[t][0] / cellM) + "," + Math.floor(pts[t][1] / cellM);
+        if (!buckets.has(k)) buckets.set(k, []);
+        buckets.get(k).push(t);
+      }
+      const exgAt = (i) => { const R = rgba[4 * i], G = rgba[4 * i + 1], B = rgba[4 * i + 2]; return (2 * G - R - B) / (R + G + B + 1); };
+      const lumaAt = (i) => 0.299 * rgba[4 * i] + 0.587 * rgba[4 * i + 1] + 0.114 * rgba[4 * i + 2];
+      // Green of sunlit pecan leaves in this image (lower quartile).
+      const leaves = [];
+      for (let i = 0; i < n; i += 7) if (mask[i] && lumaAt(i) >= thresholds.darkY) leaves.push(exgAt(i));
+      const leafGreen = leaves.length ? percentile(leaves, 25) : 0.1;
+      const cand = new Uint8Array(n);
+      for (let i = 0; i < n; i++) cand[i] = small[i] && valid[i] && !mask[i] && !labels[i] && !trimmedAway[i] ? 1 : 0;
+      const comp = label(cand, w, h);
+      const m = comp.count;
+      const cnt = new Int32Array(m + 1), sumX = new Float64Array(m + 1), sumY = new Float64Array(m + 1), sumL = new Float64Array(m + 1);
+      for (let i = 0; i < n; i++) {
+        const l = comp.labels[i];
+        if (!l) continue;
+        cnt[l]++; sumX[l] += i % w; sumY[l] += (i / w) | 0; sumL[l] += lumaAt(i);
+      }
+      const crownAreas = refs.map((t) => sizes[t + 1] * area);
+      const maxArea = Math.min(30, Math.max(4, 0.5 * percentile(crownAreas, 50)));
+      // Tree-sized and sunlit (a piece in the cast shadow of a big tree is
+      // shadow over grass, not a young tree).
+      const keepComp = new Uint8Array(m + 1);
+      for (let l = 1; l <= m; l++) keepComp[l] = cnt[l] * area >= 0.6 && cnt[l] * area <= maxArea && sumL[l] / cnt[l] >= thresholds.darkY ? 1 : 0;
+      const toEdge = edt(valid, w, h);
+      const reach = new Float64Array(m + 1), edgeMin = new Float64Array(m + 1).fill(Infinity);
+      const border = new Int32Array(m + 1), touch = new Int32Array(m + 1);
+      const greens = new Map(), pix = new Map();
+      const ringSeen = new Set();
+      for (let i = 0; i < n; i++) {
+        const l = comp.labels[i];
+        if (!l || !keepComp[l]) continue;
+        const x = i % w, y = (i / w) | 0;
+        const d2 = (x - sumX[l] / cnt[l]) ** 2 + (y - sumY[l] / cnt[l]) ** 2;
+        if (d2 > reach[l]) reach[l] = d2;
+        if (toEdge[i] < edgeMin[l]) edgeMin[l] = toEdge[i];
+        if (!greens.has(l)) { greens.set(l, []); pix.set(l, []); }
+        greens.get(l).push(exgAt(i));
+        pix.get(l).push(i);
+        for (const j of [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1]) {
+          if (j < 0 || comp.labels[j] === l || ringSeen.has(j)) continue;
+          ringSeen.add(j);
+          border[l]++;
+          if (labels[j]) touch[l]++;
+        }
+      }
+      // Green of the open ground (no crown) within 1 m around a piece.
+      const ringGreens = (list) => {
+        const r = Math.max(1, Math.round(1.0 / pixel));
+        let x0 = w, y0 = h, x1 = 0, y1 = 0;
+        for (const i of list) { const x = i % w, y = (i / w) | 0; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+        x0 = Math.max(0, x0 - r - 1); y0 = Math.max(0, y0 - r - 1); x1 = Math.min(w - 1, x1 + r + 1); y1 = Math.min(h - 1, y1 + r + 1);
+        const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+        const own = new Uint8Array(bw * bh);
+        for (const i of list) own[(((i / w) | 0) - y0) * bw + (i % w) - x0] = 1;
+        const grown = dilate(own, bw, bh, r);
+        const out = [];
+        for (let k = 0; k < bw * bh; k++) {
+          if (!grown[k] || own[k]) continue;
+          const i = (((k / bw) | 0) + y0) * w + (k % bw) + x0;
+          if (valid[i] && !labels[i]) out.push(exgAt(i));
+        }
+        return out;
+      };
+      const best = new Map();
+      for (let l = 1; l <= m; l++) {
+        if (!keepComp[l]) continue;
+        const A = cnt[l] * area;
+        if (Math.sqrt(reach[l]) * pixel > 0.45 * inRow) continue;       // compact, not a strip
+        if (cnt[l] / (Math.PI * Math.max(reach[l], 1)) < 0.35) continue; // round like a crown
+        if (touch[l] > 0.15 * border[l]) continue;                      // free-standing, not the edge of a big crown
+        if (edgeMin[l] * pixel < 0.5 * inRow) continue;                // not on the field edge
+        if (percentile(greens.get(l), 75) < leafGreen) continue;       // as green as pecan leaves
+        // A young tree stands out from the bare tree strip around it; a
+        // greener spot inside grass does not (ground 1 m around it).
+        const ring = ringGreens(pix.get(l));
+        if (ring.length) {
+          const own25 = percentile(greens.get(l), 25), own75 = percentile(greens.get(l), 75);
+          const asGreen = ring.filter((v) => v >= own25).length / ring.length;
+          if (asGreen > 0.12 || own75 - percentile(ring, 50) < 0.12) continue;
+        }
+        const spot = [(sumX[l] / cnt[l] + 0.5) * pixel, (h - sumY[l] / cnt[l] - 0.5) * pixel];
+        const near = [];
+        const bx = Math.floor(spot[0] / cellM), by = Math.floor(spot[1] / cellM);
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+          for (const t of buckets.get((bx + dx) + "," + (by + dy)) || []) {
+            const d = Math.hypot(pts[t][0] - spot[0], pts[t][1] - spot[1]);
+            if (d < 1.5 * cellM) near.push([d, t]);
+          }
+        }
+        if (near.length < 2) continue;
+        near.sort((p, q) => p[0] - q[0]);
+        const us = [], vs = [];
+        for (const [, t] of near.slice(0, 6)) {
+          const ex = spot[0] - pts[t][0], ey = spot[1] - pts[t][1];
+          us.push(pos[t][0] + I[0][0] * ex + I[0][1] * ey);
+          vs.push(pos[t][1] + I[1][0] * ex + I[1][1] * ey);
+        }
+        const u = percentile(us, 50), v = percentile(vs, 50);
+        const p = Math.round(u), q = Math.round(v);
+        if (Math.abs(u - p) > 0.3 || Math.abs(v - q) > 0.25) continue;  // on a planting position
+        const range = rowRange.get(q);
+        if (!range || p < range[0] - 1 || p > range[1] + 1) continue;   // in a planted row
+        const key = p + "," + q;
+        if (occupied.has(key)) continue;                                // that position is empty
+        const prev = best.get(key);
+        if (!prev || A > prev.A) best.set(key, { l, A, pos: [p, q], spot });
+      }
+      const idOf = new Int32Array(m + 1);
+      for (const c of best.values()) {
+        idOf[c.l] = count + extra.length + 1;
+        extra.push({ pos: c.pos, spot: c.spot, size: cnt[c.l], young: true });
+      }
+      for (let i = 0; i < n; i++) {
+        const id = idOf[comp.labels[i]];
+        if (id) { labels[i] = id; mask[i] = 1; }
+      }
+    }
     const total = count + extra.length;
     extra.forEach((e, k) => {
       pts.push(e.spot); knots.push(e.spot); scores.push(0); pos.push(e.pos); eligible.push(true);
@@ -1431,8 +1582,8 @@
     const aliveAll = new Uint8Array(total);
     for (let t = 0; t < count; t++) aliveAll[t] = alive[t];
     for (let t = count; t < total; t++) aliveAll[t] = 1;
-    const inferred = new Uint8Array(total);
-    for (let t = count; t < total; t++) inferred[t] = 1;
+    const inferred = new Uint8Array(total), young = new Uint8Array(total);
+    for (let t = count; t < total; t++) { if (extra[t - count].young) young[t] = 1; else inferred[t] = 1; }
 
     // Crown boxes and areas (after merges and splits).
     const area2 = new Float64Array(total + 1), box = Array.from({ length: total + 1 }, () => [Infinity, Infinity, -Infinity, -Infinity]);
@@ -1443,8 +1594,9 @@
       const bb = box[l];
       if (x < bb[0]) bb[0] = x; if (y < bb[1]) bb[1] = y; if (x > bb[2]) bb[2] = x; if (y > bb[3]) bb[3] = y;
     }
-    // Crowns below 2 m² are not shown, so they take no part in the colours.
-    for (let t = 0; t < total; t++) if (area2[t + 1] * area < 2.0) aliveAll[t] = 0;
+    // Crowns below 2 m² are not shown, so they take no part in the colours
+    // (young trees on their planting position excepted).
+    for (let t = 0; t < total; t++) if (area2[t + 1] * area < 2.0 && !young[t]) aliveAll[t] = 0;
 
     // ---------------- diagonals
     await step("Drawing the EVEN / ODD diagonals …");
@@ -1709,7 +1861,7 @@
     const crowns = [];
     const minI = Math.min(...pos.filter(Boolean).map((p) => p[0])), minJ = Math.min(...pos.filter(Boolean).map((p) => p[1]));
     for (let t = 0; t < total; t++) {
-      if (!aliveAll[t] || !(area2[t + 1] * area >= 2.0)) continue;
+      if (!aliveAll[t] || !(area2[t + 1] * area >= 2.0 || (young[t] && area2[t + 1] > 0))) continue;
       const polys = tracePolygons(labels, w, t + 1, box[t + 1]).map((poly) =>
         poly.map((ring) => {
           const s = simplifyRing(ring.concat([ring[0]]), 0.6);
@@ -1719,6 +1871,7 @@
       const flags = [];
       if (!pos[t]) flags.push("OFF_GRID");
       if (inferred[t]) flags.push("INFERRED_FROM_SPACING");
+      if (young[t]) flags.push("YOUNG_TREE");
       if (pieces[t] > 1) flags.push("MERGED_SPLIT_CROWN");
       if (alt.moved[t]) flags.push("MOVED_ACROSS_GAP");
       const hgt = heights && heights[t + 1];
@@ -1755,6 +1908,7 @@
         crowns_moved_across_gap: alt.moved.reduce((s, v, t) => s + (v && aliveAll[t] ? 1 : 0), 0),
         diagonal_extra_steps_from_moves: alt.extraSteps,
         off_grid_crowns_recoloured_to_alternate: recoloured,
+        young_trees_added: crowns.filter((c) => /YOUNG_TREE/.test(c.flags)).length,
         row_neighbours: rowPairs,
         row_neighbours_same_colour: rowSame,
         crowns_crossed_by_their_diagonal: onGrid ? crossedOwn / onGrid : null,
@@ -1776,6 +1930,6 @@
 
   window.PecanAnalysis = {
     analyze, groundPixelSize, gridSize, countField, createGrid, sampleSurface, DETAIL_PIXELS,
-    VERSION: "2026-11-13",
+    VERSION: "2026-11-19",
   };
 })();
