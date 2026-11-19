@@ -99,3 +99,5 @@ a.btn { text-decoration: none; display: inline-block; }
 .seg button { padding: 8px 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); font-size: .9rem; cursor: pointer; }
 .seg button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 .cmp td .chip { margin-left: 4px; }
+.ico { width: 1.15em; height: 1.15em; vertical-align: -0.2em; margin-right: 5px; }
+.tabs button { display: inline-flex; align-items: center; justify-content: center; }

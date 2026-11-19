@@ -90,7 +90,8 @@ function start({ series, facts, meta }) {
   sd.addEventListener("change", update); nd.addEventListener("input", update);
   document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
   $("topic").addEventListener("change", renderFacts);
-  setupAsk();
+  S.ai = GreenhouseAI.setup({ answer: quickAnswer, context: quickContext,
+    dataNote: "The data comes from a greenhouse simulation." });
   update();
 }
 
@@ -322,125 +323,10 @@ function quickContext(q) {
   return lines.join("\n");
 }
 
-// ---------------- Gemini (optional, called directly from the browser)
-const FAST_SYSTEM = "You answer greenhouse growers in one or two short sentences (at most 40 words). Use only the facts given in the message; keep every number and unit exactly as given; never add numbers. Use plain words, no jargon. If the facts do not answer the question, say briefly what the data shows instead. Say 'indoor' and 'outdoor' (not inside/outside). Answer in the language of the question. The data comes from a greenhouse simulation.";
-const SKIP = ["image", "tts", "audio", "live", "embedding", "robotics", "computer", "native", "learnlm", "gemma"];
-
-function rankModels(names) {
-  return names.map((n) => n.split("/").pop()).filter((n) => n.startsWith("gemini") && !SKIP.some((s) => n.includes(s)))
-    .map((n) => { const v = parseFloat((n.match(/gemini-(\d+(?:\.\d+)?)/) || [0, 0])[1]);
-      const tier = n.includes("flash") && !n.includes("lite") ? 0 : n.includes("flash") ? 1 : 2;
-      return { n, key: [tier, /preview|exp/.test(n) ? 1 : 0, -v, n.length] }; })
-    .sort((a, b) => { for (let i = 0; i < 4; i++) if (a.key[i] !== b.key[i]) return a.key[i] - b.key[i]; return 0; })
-    .map((x) => x.n);
-}
-
-async function gemini(path, body, key, ms) {
-  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), ms);
-  try {
-    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/${path}`, {
-      method: body ? "POST" : "GET", headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-      body: body ? JSON.stringify(body) : undefined, signal: ctl.signal });
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) { const e = new Error((data.error && data.error.message) || r.statusText); e.code = r.status; throw e; }
-    return data;
-  } finally { clearTimeout(timer); }
-}
-
-async function loadModels(key) {
-  const d = await gemini("models?pageSize=200", null, key, 10000);
-  S.models = rankModels((d.models || []).filter((m) => !m.supportedGenerationMethods ||
-    m.supportedGenerationMethods.includes("generateContent")).map((m) => m.name));
-  return S.models;
-}
-
-async function askFast(q, key, budgetMs = 2000) {
-  const t0 = performance.now();
-  if (!S.models) await loadModels(key);
-  const lite = S.models.filter((n) => n.includes("flash-lite")).slice(0, 1);
-  const flash = S.models.filter((n) => n.includes("flash") && !n.includes("lite")).slice(0, 2);
-  const cands = [...lite, ...flash].length ? [...lite, ...flash] : S.models.slice(0, 3);
-  const hist = S.chat.slice(-4).map((m) => ({ role: m.role === "user" ? "user" : "model", parts: [{ text: m.text }] }));
-  const contents = [...hist, { role: "user", parts: [{ text: `${quickContext(q)}\n\nGrower's question: ${q}` }] }];
-  let last;
-  for (const name of cands) {
-    for (const thinking of [true, false]) {
-      const left = budgetMs - (performance.now() - t0);
-      if (left < 400) throw last || new Error("too slow");
-      const body = { system_instruction: { parts: [{ text: FAST_SYSTEM }] }, contents,
-        generationConfig: { maxOutputTokens: 200, ...(thinking ? { thinkingConfig: { thinkingLevel: "MINIMAL" } } : {}) } };
-      try {
-        const d = await gemini(`models/${name}:generateContent`, body, key, left);
-        const text = ((d.candidates || [])[0]?.content?.parts || []).map((p) => p.text || "").join("").trim();
-        if (text) return { text, model: name };
-        break;
-      } catch (e) {
-        last = e;
-        if (thinking && e.code === 400 && /think/i.test(e.message)) continue;
-        break;
-      }
-    }
-  }
-  throw last || new Error("no answer");
-}
-
-// ---------------- ask tab
-function getKey() {
-  try { return localStorage.getItem("ghKey") || sessionStorage.getItem("ghKey") || ""; } catch { return ""; }
-}
-
-function setupAsk() {
-  const key = getKey();
-  if (key) { $("key").value = key; $("remember").checked = (() => { try { return !!localStorage.getItem("ghKey"); } catch { return false; } })(); }
-  const save = () => {
-    const k = $("key").value.trim();
-    try {
-      localStorage.removeItem("ghKey"); sessionStorage.removeItem("ghKey");
-      if (k) ($("remember").checked ? localStorage : sessionStorage).setItem("ghKey", k);
-    } catch { /* storage blocked: key lives only in the box */ }
-    S.models = null;
-    $("ai-status").textContent = k ? "· key entered" : "· not connected";
-  };
-  $("key").addEventListener("change", save); $("remember").addEventListener("change", save);
-  $("ai-status").textContent = key ? "· key entered" : "· not connected";
-  $("check").addEventListener("click", async () => {
-    save(); const k = $("key").value.trim();
-    if (!k) { $("check-msg").textContent = "Paste a key first."; return; }
-    $("check-msg").textContent = "Checking…";
-    try { const m = await loadModels(k); $("check-msg").textContent = m.length ? `Connected to Gemini. It will use ${m.filter((n) => n.includes("flash"))[0] || m[0]}.` : "The key works, but no text model is available."; }
-    catch (e) { $("check-msg").textContent = /API key not valid|API_KEY_INVALID|permission/i.test(e.message) ? "The key was not accepted. Copy it again from AI Studio." : `Could not connect: ${e.message}`; }
-  });
-  $("forget").addEventListener("click", () => { $("key").value = ""; save(); $("check-msg").textContent = "Key removed from this device."; });
-  $("ask-form").addEventListener("submit", (ev) => { ev.preventDefault(); const q = $("question").value.trim(); if (q) { $("question").value = ""; ask(q); } });
-  $("clear").addEventListener("click", () => { S.chat = []; $("chat").innerHTML = ""; $("clear").hidden = true; });
-}
-
+// ---------------- ask tab (shared code in ai.js: instant answer + optional Gemini wording)
 function renderExamples() {
-  const ex = [`Why did heating go up on the night of ${S.startStr}?`, `Is the temperature okay on ${S.startStr}?`, `Should I open the vents on ${S.startStr}?`];
-  $("examples").innerHTML = "";
-  ex.forEach((q) => { const b = document.createElement("button"); b.className = "btn example"; b.type = "button"; b.textContent = q; b.onclick = () => ask(q); $("examples").appendChild(b); });
-}
-
-function bubble(role, text, foot) {
-  const div = document.createElement("div"); div.className = `msg ${role === "user" ? "user" : "bot"}`;
-  div.textContent = text;
-  if (foot) { const s = document.createElement("span"); s.className = "foot"; s.textContent = foot; div.appendChild(s); }
-  $("chat").appendChild(div); div.scrollIntoView({ block: "nearest" }); return div;
-}
-
-async function ask(q) {
-  bubble("user", q); $("clear").hidden = false;
-  const quick = quickAnswer(q), key = $("key").value.trim() || getKey();
-  if (!key) { bubble("bot", quick, "Instant answer from the data. Add a free Gemini key in Connect AI for answers in natural words."); S.chat.push({ role: "user", text: q }, { role: "bot", text: quick }); return; }
-  const b = bubble("bot", quick, "⏳ Improving the wording with AI…");
-  try {
-    const r = await askFast(q, key, 2000);
-    b.textContent = r.text; const s = document.createElement("span"); s.className = "foot"; s.textContent = `AI: Gemini · ${r.model}`; b.appendChild(s);
-    S.chat.push({ role: "user", text: q }, { role: "bot", text: r.text });
-  } catch (e) {
-    b.querySelector(".foot").textContent = "Instant answer from the data (the AI did not reply within 2 seconds).";
-    S.chat.push({ role: "user", text: q }, { role: "bot", text: quick });
-  }
+  S.ai.setExamples([`Why did heating go up on the night of ${S.startStr}?`, `Is the temperature okay on ${S.startStr}?`,
+    `Should I open the vents on ${S.startStr}?`]);
 }
 
 function esc(s) { return String(s).replace(/–-/g, " to -").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
