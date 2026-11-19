@@ -100,4 +100,11 @@ a.btn { text-decoration: none; display: inline-block; }
 .seg button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 .cmp td .chip { margin-left: 4px; }
 .ico { width: 1.15em; height: 1.15em; vertical-align: -0.2em; margin-right: 5px; }
+.seg.five { grid-template-columns: repeat(5, 1fr); }
+.seg.five button { padding: 8px 2px; font-size: .85rem; }
+.spark { display: block; width: 100%; max-width: 120px; height: 24px; margin-top: 3px; overflow: visible; }
+.trend { font-size: .75rem; color: var(--muted); margin-left: 4px; white-space: nowrap; }
+.cmp td { vertical-align: top; }
+@keyframes flash { from { background: var(--accent-soft); } to { background: var(--panel); } }
+.flash { animation: flash 1.2s ease-out; }
 .tabs button { display: inline-flex; align-items: center; justify-content: center; }

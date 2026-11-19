@@ -50,9 +50,10 @@
 
     <section class="card period" aria-label="Period to show">
       <p class="muted tiny" style="margin-top:0">Period (for summary, charts, answers and facts)</p>
-      <div class="seg" role="group" aria-label="Period">
-        <button type="button" data-range="6h">Last 6 h</button>
-        <button type="button" data-range="24h" aria-pressed="true">24 h</button>
+      <div class="seg five" role="group" aria-label="Period">
+        <button type="button" data-range="30m" aria-pressed="true">30 min</button>
+        <button type="button" data-range="6h">6 h</button>
+        <button type="button" data-range="24h">24 h</button>
         <button type="button" data-range="3d">3 days</button>
         <button type="button" data-range="7d">7 days</button>
       </div>
@@ -68,8 +69,8 @@
     <main>
       <section class="tab active" id="tab-summary">
         <div id="alerts"></div>
-        <div class="card">
-          <h3 class="flush">Now</h3>
+        <div class="card" id="now-card">
+          <h3 class="flush">Now <span class="muted tiny">· small lines = last 30 minutes, arrows = change in 5 minutes</span></h3>
           <div id="now"></div>
         </div>
         <h3>Equipment and crop · now</h3>
@@ -88,8 +89,12 @@
         <p class="muted" id="chart-note"></p>
         <h3>Temperature (°C) <span class="muted">· band = allowed indoor range</span></h3>
         <div class="chart"><canvas id="l-temp"></canvas></div>
+        <h3>Indoor temperature (°C) <span class="muted">· zoomed in</span></h3>
+        <div class="chart small"><canvas id="l-tin"></canvas></div>
         <h3>Humidity (%) <span class="muted">· dashed = indoor maximum</span></h3>
         <div class="chart small"><canvas id="l-rh"></canvas></div>
+        <h3>Indoor humidity (%) <span class="muted">· zoomed in</span></h3>
+        <div class="chart small"><canvas id="l-rhin"></canvas></div>
         <h3>CO₂ (ppm)</h3>
         <div class="chart small"><canvas id="l-co2"></canvas></div>
         <h3>Outdoor CO₂ (ppm) <span class="muted">· zoomed in</span></h3>

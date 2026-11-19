@@ -8,15 +8,15 @@ const LIM = { rh_max: 80, co2_max: 1600, ...(CFG.limits || {}) };
 // The sensor sends a reading every 20 s ('raw') and a 5-minute average ('sum', source name + ':5min').
 // 6 h charts use the raw readings; longer periods use the averages, so phones download little data.
 const EVERY_S = 20, REFRESH_MS = 20000;
-const RANGES = { "6h": { h: 6, b: 1, src: "raw" }, "24h": { h: 24, b: 5, src: "sum" },
+const RANGES = { "30m": { h: 0.5, b: 1 / 3, src: "raw" }, "6h": { h: 6, b: 1, src: "raw" }, "24h": { h: 24, b: 5, src: "sum" },
   "3d": { h: 72, b: 30, src: "sum" }, "7d": { h: 168, b: 60, src: "sum" } };
 const GAP_MS = { raw: 2 * 60e3, sum: 15 * 60e3 };
 const COL = { blue: "#0072B2", grey: "#999999", dark: "#6f6f6f", green: "#009E73", red: "#D55E00",
   sky: "#56B4E9", gold: "#E69F00", pink: "#CC79A7" };
-const S = { range: "24h", cache: { raw: { rows: [], from: null }, sum: { rows: [], from: null } },
+const S = { range: "30m", cache: { raw: { rows: [], from: null }, sum: { rows: [], from: null } },
   latest: null, charts: {}, timer: null, sess: null, busy: false, tab: "summary", ai: null };
 const PRICES = { heat_cad_per_kwh: 0.0374, co2_cad_per_kg: 0.30, ...(CFG.prices || {}) };   // same assumptions as the season page
-const RANGE_LABEL = { "6h": "the last 6 hours", "24h": "the last 24 hours", "3d": "the last 3 days", "7d": "the last 7 days" };
+const RANGE_LABEL = { "30m": "the last 30 minutes", "6h": "the last 6 hours", "24h": "the last 24 hours", "3d": "the last 3 days", "7d": "the last 7 days" };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (v, d = 0) => (v === null || v === undefined || Number.isNaN(v) ? "–" : Number(v).toFixed(d));
@@ -25,6 +25,7 @@ const fmt = (v, d = 0) => (v === null || v === undefined || Number.isNaN(v) ? "�
 const tz = CFG.tz || undefined;
 const fTime = new Intl.DateTimeFormat("en-CA", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false });
 const fDay = new Intl.DateTimeFormat("en-GB", { timeZone: tz, day: "2-digit", month: "short" });
+const fClock = new Intl.DateTimeFormat("en-CA", { timeZone: tz, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
 const fFull = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
   hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
 function ago(ms) {
@@ -240,17 +241,45 @@ function renderAlerts() { $("alerts").innerHTML = sensorChecks().map(([k, t]) =>
 
 function chip(text, kind) { return ` <span class="chip ${kind}">${text}</span>`; }
 
+// a small line of the last 30 minutes (own scale, so small changes show) and the change over 5 minutes
+function spark(key, color) {
+  const since = S.latest.t - 30 * 60e3;
+  const pts = S.cache.raw.rows.filter((r) => r.t >= since && r[key] !== null && r[key] !== undefined);
+  if (pts.length < 3) return "";
+  const W = 120, H = 24, vals = pts.map((r) => r[key]), lo = Math.min(...vals), hi = Math.max(...vals), rng = hi - lo || 1;
+  const t0 = pts[0].t, dt = (pts[pts.length - 1].t - t0) || 1;
+  const xy = pts.map((r) => `${((r.t - t0) / dt * W).toFixed(1)},${(H - 2 - (r[key] - lo) / rng * (H - 4)).toFixed(1)}`);
+  const [lx, ly] = xy[xy.length - 1].split(",");
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">` +
+    `<polyline points="${xy.join(" ")}" fill="none" stroke="${color}" stroke-width="1.6" vector-effect="non-scaling-stroke"/>` +
+    `<circle cx="${lx}" cy="${ly}" r="2.2" fill="${color}"/></svg>`;
+}
+
+function trend(key, digits) {
+  const L = S.latest, past = S.cache.raw.rows.filter((r) => r.t <= L.t - 5 * 60e3 && r.t >= L.t - 7 * 60e3);
+  if (!past.length || L[key] === null || past[past.length - 1][key] === null) return "";
+  const d = L[key] - past[past.length - 1][key], small = Math.abs(d) < (digits ? 0.05 : 0.5);
+  return `<span class="trend" title="change in the last 5 minutes">${small ? "→ steady" : `${d > 0 ? "▲" : "▼"} ${Math.abs(d).toFixed(digits)}`}</span>`;
+}
+
 function renderNow() {
   const r = S.latest;
   if (!r) { $("now").innerHTML = `<p class="muted">No readings yet.</p>`; $("equip").innerHTML = ""; return; }
+  if (S.shownT && S.shownT !== r.t) {                       // a new reading arrived: flash the panel
+    const card = $("now-card"); card.classList.remove("flash"); void card.offsetWidth; card.classList.add("flash");
+  }
+  S.shownT = r.t;
   const tChip = r.temp_c < r.limit_temp_min - 0.3 ? chip("too cold", "warn") : r.temp_c > r.limit_temp_max + 0.3 ? chip("too warm", "warn") : chip("OK", "ok");
   const hChip = r.rh_pct > LIM.rh_max + 1 ? chip("too humid", "warn") : chip("OK", "ok");
   const cChip = r.co2_ppm > LIM.co2_max + 50 ? chip("high", "warn") : chip("OK", "ok");
   const row = (n, a, b) => `<tr><th scope="row">${n}</th><td>${a}</td><td>${b}</td></tr>`;
   $("now").innerHTML = `<table class="cmp"><thead><tr><th></th><th scope="col">Indoor</th><th scope="col">Outdoor</th></tr></thead><tbody>` +
-    row("Temperature", `${fmt(r.temp_c, 1)} °C${tChip}`, `${fmt(r.temp_out_c, 1)} °C`) +
-    row("Humidity", `${fmt(r.rh_pct)} %${hChip}`, `${fmt(r.rh_out_pct)} %`) +
-    row("CO₂", `${fmt(r.co2_ppm)} ppm${cChip}`, `${fmt(r.co2_out_ppm)} ppm`) +
+    row("Temperature", `${fmt(r.temp_c, 1)} °C${tChip}${trend("temp_c", 1)}${spark("temp_c", COL.blue)}`,
+      `${fmt(r.temp_out_c, 1)} °C${trend("temp_out_c", 1)}${spark("temp_out_c", COL.grey)}`) +
+    row("Humidity", `${fmt(r.rh_pct)} %${hChip}${trend("rh_pct", 0)}${spark("rh_pct", COL.green)}`,
+      `${fmt(r.rh_out_pct)} %${trend("rh_out_pct", 0)}${spark("rh_out_pct", COL.grey)}`) +
+    row("CO₂", `${fmt(r.co2_ppm)} ppm${cChip}${trend("co2_ppm", 0)}${spark("co2_ppm", COL.pink)}`,
+      `${fmt(r.co2_out_ppm)} ppm${trend("co2_out_ppm", 0)}${spark("co2_out_ppm", COL.grey)}`) +
     row("Sunlight", `<span class="muted">uses outdoor</span>`, `${fmt(r.radiation_w_m2)} W/m²`) + `</tbody></table>` +
     `<p class="muted tiny">Allowed indoor now: ${fmt(r.limit_temp_min)}–${fmt(r.limit_temp_max)} °C, humidity up to ${LIM.rh_max} %, CO₂ up to ${LIM.co2_max} ppm.</p>`;
   const m = (label, value, delta) => `<div class="metric"><div class="label">${label}</div><div class="value">${value}</div>${delta ? `<div class="delta">${delta}</div>` : ""}</div>`;
@@ -276,11 +305,18 @@ function buckets() {
   }
   const times = Array.from({ length: n }, (_, i) => start + i * step);
   const series = (k) => times.map((_, i) => { const s = sums.get(i); return s && s[k] ? s[k][0] / s[k][1] : null; });
-  const labels = times.map((t) => (h <= 24 ? fTime.format(t) : `${fDay.format(t)} ${fTime.format(t)}`));
+  const labels = times.map((t) => (h < 1 ? fClock.format(t) : h <= 24 ? fTime.format(t) : `${fDay.format(t)} ${fTime.format(t)}`));
   return { labels, series };
 }
 
 function chart(id, labels, datasets) {
+  for (const d of datasets) {                                // a dot on the newest value of each line
+    if (d.hideLegend || d.fill) continue;
+    let last = -1;
+    d.data.forEach((v, i) => { if (v !== null) last = i; });
+    d.pointRadius = d.data.map((_, i) => (i === last ? 3.5 : 0));
+    d.pointBackgroundColor = d.borderColor;
+  }
   const css = getComputedStyle(document.documentElement);
   const ink = css.getPropertyValue("--muted").trim() || "#5b6670", grid = css.getPropertyValue("--line").trim() || "#dde3e8";
   const cfg = {
@@ -304,13 +340,15 @@ function renderCharts() {
   if (typeof Chart === "undefined") { $("chart-note").textContent = "Charts need an internet connection to load."; return; }
   const { labels, series } = buckets(), R = RANGES[S.range];
   $("chart-note").textContent = `Grey line = outdoor, coloured line = indoor. ` +
-    (R.src === "raw" ? `Readings every ${EVERY_S} s, shown as 1-min averages` : `${R.b}-min averages`) +
+    (R.b < 1 ? `Every reading (every ${EVERY_S} s)` : R.src === "raw" ? `Readings every ${EVERY_S} s, shown as 1-min averages` : `${R.b}-min averages`) +
     "; a break in a line means no readings. Updates every 20 seconds.";
   chart("l-temp", labels, [
     { label: "min", data: series("limit_temp_min"), borderColor: "transparent", hideLegend: true },
     { label: "max", data: series("limit_temp_max"), borderColor: "transparent", backgroundColor: "rgba(0,114,178,.13)", fill: "-1", hideLegend: true },
     { label: "Indoor", data: series("temp_c"), borderColor: COL.blue },
     { label: "Outdoor", data: series("temp_out_c"), borderColor: COL.grey }]);
+  chart("l-tin", labels, [{ label: "Indoor", data: series("temp_c"), borderColor: COL.blue }]);
+  chart("l-rhin", labels, [{ label: "Indoor", data: series("rh_pct"), borderColor: COL.green }]);
   chart("l-rh", labels, [{ label: "Indoor", data: series("rh_pct"), borderColor: COL.green },
     { label: "Outdoor", data: series("rh_out_pct"), borderColor: COL.grey },
     { label: "max", data: labels.map(() => LIM.rh_max), borderColor: COL.red, borderDash: [5, 4], borderWidth: 1.5, hideLegend: true }]);
