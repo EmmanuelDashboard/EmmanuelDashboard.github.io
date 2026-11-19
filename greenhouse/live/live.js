@@ -372,75 +372,35 @@ function forecastEvents() {
   const vent = runs(F, (r) => r.ventilation_mm_s > 0.5, 0, 16 * 60e3)[0];
   if (vent) {
     const rs = F.slice(vent[0], vent[1] + 1);
-    ev.push({ t: F[vent[0]].t, x: `The vents should open more (up to ${f1(Math.max(...rs.map((r) => r.ventilation_mm_s)))} mm/s) from about ${fTime.format(F[vent[0]].t)} to ${fTime.format(F[vent[1]].t)}, when indoor reaches ${f1(Math.max(...rs.map((r) => r.temp_c)))} °C.` });
+    ev.push({ t: F[vent[0]].t, x: `The vents should open more (up to about ${f1(Math.max(...rs.map((r) => r.ventilation_mm_s)))} mm/s) from about ${fTime.format(F[vent[0]].t)} to ${fTime.format(F[vent[1]].t)}, when indoor reaches about ${r0(Math.max(...rs.map((r) => r.temp_c)))} °C.` });
   }
   const dosing = (r) => r.co2_supply_mg_m2_s > 0.01, sw = F.find((r) => dosing(r) !== dosing(L));
   if (sw) ev.push({ t: sw.t, x: `CO₂ dosing should ${dosing(sw) ? "start" : "stop"} around ${fTime.format(sw.t)} ${dosing(sw) ? "(daylight: it helps the lettuce grow)" : "(less light, so extra CO₂ helps less)"}.` });
   const cold = F.find((r) => r.temp_c < r.limit_temp_min - 0.3), warm = F.find((r) => r.temp_c > r.limit_temp_max + 0.3);
-  if (cold) ev.push({ t: cold.t, x: `The greenhouse may get a little too cold around ${fTime.format(cold.t)} (${f1(cold.temp_c)} °C, minimum ${r0(cold.limit_temp_min)} °C).` });
-  if (warm) ev.push({ t: warm.t, x: `The greenhouse may get too warm around ${fTime.format(warm.t)} (${f1(warm.temp_c)} °C, maximum ${r0(warm.limit_temp_max)} °C).` });
-  if (!ev.length) ev.push({ t: F[0].t, x: `No big changes expected: indoor ${span(Math.min(...F.map((r) => r.temp_c)), Math.max(...F.map((r) => r.temp_c)), 1)} °C, heating ${span(lo.heating_w_m2, hi.heating_w_m2)} W/m².` });
+  if (cold) ev.push({ t: cold.t, x: `The greenhouse may get a little too cold around ${fTime.format(cold.t)} (minimum ${r0(cold.limit_temp_min)} °C).` });
+  if (warm) ev.push({ t: warm.t, x: `The greenhouse may get too warm around ${fTime.format(warm.t)} (maximum ${r0(warm.limit_temp_max)} °C).` });
+  if (!ev.length) ev.push({ t: F[0].t, x: `No big changes planned: indoor about ${span(Math.min(...F.map((r) => r.temp_c)), Math.max(...F.map((r) => r.temp_c)))} °C, heating about ${span(lo.heating_w_m2, hi.heating_w_m2)} W/m².` });
   return ev.sort((a, b) => a.t - b.t);
 }
 
+// The plan is shown in words, not as forecast curves: a single forecast line without its uncertainty is easily
+// read as certain (Joslyn & Savelli 2021), and growers' explanations of MPC plans work best as text
+// (Naagarajan et al. 2025). The pretend controller also knew the weather exactly, so curves would look too sure.
 function renderForecast() {
   const F = S.fc.rows, L = S.latest;
   if (!F.length || !L) {
-    $("fc-table").innerHTML = `<p class="muted">No forecast yet. The controller makes a new 6-hour forecast every 15 minutes while the sensor runs.</p>`;
-    $("fc-events").innerHTML = ""; $("fc-note").textContent = ""; return;
+    $("fc-events").innerHTML = `<li class="muted">No plan yet. The controller makes a new 6-hour plan every 15 minutes while the sensor runs.</li>`;
+    $("fc-note").textContent = ""; return;
   }
-  const pick = (h) => F.reduce((a, r) => (Math.abs(r.t - (fcMade() + h * 3600e3)) < Math.abs(a.t - (fcMade() + h * 3600e3)) ? r : a));
-  const row = (label, r) => `<tr><th scope="row">${label}<br><span class="muted tiny">${fTime.format(r.t)}</span></th><td>${f1(r.temp_c)} °C</td><td>${r0(r.rh_pct)} %</td><td>${r0(r.co2_ppm)} ppm</td><td>${r0(r.heating_w_m2)} W/m²</td></tr>`;
-  $("fc-table").innerHTML = `<table class="cmp fc"><thead><tr><th></th><th>Indoor</th><th>Humidity</th><th>CO₂</th><th>Heating</th></tr></thead><tbody>` +
-    row("Now", L) + row("In 1 h", pick(1)) + row("In 3 h", pick(3)) + row("In 6 h", pick(6)) + `</tbody></table>`;
   $("fc-events").innerHTML = forecastEvents().map((e) => `<li>${esc(e.x)}</li>`).join("");
-  $("fc-note").textContent = `Forecast made at ${fTime.format(fcMade())} by the controller (MPC): its own predictions and plan. ` +
-    (CFG.source === "pretend" ? "With the pretend sensor this is the forecast the simulation's controller made at that moment. " : "") +
-    "It assumes the weather forecast is right." + (fcOld() ? " This forecast is old: the sensor may have stopped." : "");
-}
-
-function renderForecastCharts() {
-  const F = S.fc.rows, L = S.latest;
-  if (!F.length || !L) { $("fc-chart-note").textContent = "No forecast yet."; return; }
-  const step = 5 * 60e3, now = Date.now(), start = Math.floor((now - 3600e3) / step) * step, end = F[F.length - 1].t;
-  const n = Math.round((end - start) / step) + 1, times = Array.from({ length: n }, (_, i) => start + i * step);
-  const nowIdx = Math.min(n - 1, Math.floor((L.t - start) / step));
-  const measured = (k) => {
-    const s = new Map();
-    for (const r of S.cache.raw.rows) {
-      const i = Math.floor((r.t - start) / step);
-      if (i < 0 || i >= n || r[k] === null) continue;
-      const v = s.get(i) || [0, 0]; v[0] += r[k]; v[1]++; s.set(i, v);
-    }
-    return times.map((_, i) => (s.has(i) ? s.get(i)[0] / s.get(i)[1] : null));
-  };
-  const predicted = (k) => {
-    const out = times.map(() => null);
-    out[nowIdx] = L[k];                                        // join the dashed line to the latest reading
-    for (const r of F) { const i = Math.round((r.t - start) / step); if (i >= 0 && i < n) out[i] = r[k]; }
-    return out;
-  };
-  const both = (k) => { const m = measured(k), p = predicted(k); return m.map((v, i) => (i <= nowIdx && v !== null ? v : p[i])); };
-  const labels = times.map((t, i) => (i === nowIdx ? "now" : fTime.format(t)));
-  const fc = (label, k, color) => ({ label: `${label} forecast`, data: predicted(k), borderColor: color, borderDash: [6, 4], spanGaps: true, noDot: true });
-  $("fc-chart-note").textContent = `Forecast made at ${fTime.format(fcMade())}; it reaches ${fTime.format(end)}.` + (fcOld() ? " It is old: the sensor may have stopped." : "");
-  chart("f-temp", labels, [
-    { label: "min", data: both("limit_temp_min"), borderColor: "transparent", hideLegend: true, spanGaps: true },
-    { label: "max", data: both("limit_temp_max"), borderColor: "transparent", backgroundColor: "rgba(0,114,178,.13)", fill: "-1", hideLegend: true, spanGaps: true },
-    { label: "Indoor", data: measured("temp_c"), borderColor: COL.blue }, fc("Indoor", "temp_c", COL.blue),
-    { label: "Outdoor", data: measured("temp_out_c"), borderColor: COL.grey }, fc("Outdoor", "temp_out_c", COL.grey)]);
-  chart("f-rh", labels, [
-    { label: "Indoor", data: measured("rh_pct"), borderColor: COL.green }, fc("Indoor", "rh_pct", COL.green),
-    { label: "Outdoor", data: measured("rh_out_pct"), borderColor: COL.grey }, fc("Outdoor", "rh_out_pct", COL.grey)]);
-  chart("f-heat", labels, [{ label: "Heating", data: measured("heating_w_m2"), borderColor: COL.red },
-    fc("Heating", "heating_w_m2", COL.red)]);
-  chart("f-co2", labels, [{ label: "Indoor", data: measured("co2_ppm"), borderColor: COL.pink }, fc("Indoor", "co2_ppm", COL.pink)]);
+  $("fc-note").textContent = `Plan made at ${fTime.format(fcMade())} by the controller (MPC). It is a plan, not a certainty: ` +
+    "it depends on the weather forecast and on how well the model fits the greenhouse." +
+    (CFG.source === "pretend" ? " In this pretend setup the controller knew the weather exactly, so real plans will be less sure." : "") +
+    (fcOld() ? " This plan is old: the sensor may have stopped." : "");
 }
 
 function renderCharts() {
   if (typeof Chart === "undefined") { $("chart-note").textContent = "Charts need an internet connection to load."; return; }
-  renderForecastCharts();
-  $("hist-label").textContent = `· ${RANGE_LABEL[S.range]}`;
   const { labels, series } = buckets(), R = RANGES[S.range];
   $("chart-note").textContent = `Grey line = outdoor, coloured line = indoor. ` +
     (R.b < 1 ? `Every reading (every ${EVERY_S} s)` : R.src === "raw" ? `Readings every ${EVERY_S} s, shown as 1-min averages` : `${R.b}-min averages`) +
@@ -622,7 +582,7 @@ function makeFacts() {
     if (d > gapMs) facts.push({ v: "sensors", t: rows[k - 1].t, x: `No readings from ${tStr(rows[k - 1].t, wd)} to ${tStr(rows[k].t, wd)} (${ago(d).replace(" ago", "")}).` });
   }
   for (const [kind, text] of sensorChecks()) if (kind === "bad" || kind === "warn") facts.push({ v: "sensors", t: Date.now(), x: text });
-  for (const e of forecastEvents()) facts.push({ v: "forecast", t: e.t, x: `Forecast: ${e.x}` });
+  for (const e of forecastEvents()) facts.push({ v: "forecast", t: e.t, x: `Plan: ${e.x}` });
   return facts.sort((p, q) => q.t - p.t);
 }
 
@@ -631,7 +591,7 @@ function renderFacts() {
   const list = all.filter((f) => topic === "all" || f.v === topic);
   $("facts-note").textContent = `${list.length} fact${list.length === 1 ? "" : "s"} for ${RANGE_LABEL[S.range]}, newest first` +
     (list.length > 150 ? "; showing the first 150." : ".");
-  const NAME = { forecast: "forecast", day: "day", temperature: "temperature", humidity: "humidity", heating: "heating", ventilation: "vents", co2: "CO₂", sensors: "sensors" };
+  const NAME = { forecast: "plan", day: "day", temperature: "temperature", humidity: "humidity", heating: "heating", ventilation: "vents", co2: "CO₂", sensors: "sensors" };
   $("facts").innerHTML = list.slice(0, 150).map((f) => `<div class="fact"><b>${NAME[f.v]}</b> · ${esc(f.x)}</div>`).join("") ||
     `<p class="muted">Nothing to report for this topic in this period.</p>`;
 }
@@ -684,12 +644,12 @@ function targetTime(ql) {
 
 function futureAnswer(ql) {
   const F = S.fc.rows, L = S.latest;
-  if (!F.length) return "There is no forecast yet. The controller makes a new 6-hour forecast every 15 minutes while the sensor runs.";
+  if (!F.length) return "There is no plan yet. The controller makes a new 6-hour plan every 15 minutes while the sensor runs.";
   const end = F[F.length - 1].t;
-  const made = ` (forecast by the controller, made at ${fTime.format(fcMade())}${fcOld() ? "; it is old, the sensor may have stopped" : ""}; it assumes the weather forecast is right)`;
-  if (/tomorrow|next week|next day/.test(ql)) return `The forecast only covers the next 6 hours, until ${fTime.format(end)}.`;
+  const made = ` (the controller's plan made at ${fTime.format(fcMade())}${fcOld() ? ", which is old: the sensor may have stopped" : ""}; not a certainty, it depends on the weather forecast)`;
+  if (/tomorrow|next week|next day/.test(ql)) return `The controller only plans 6 hours ahead, until ${fTime.format(end)}.`;
   const tgt = targetTime(ql);
-  if (typeof tgt === "number" && tgt > end + 8 * 60e3) return `The forecast only reaches ${fTime.format(end)} (6 hours ahead). Ask about a time before then.`;
+  if (typeof tgt === "number" && tgt > end + 8 * 60e3) return `The controller only plans until ${fTime.format(end)} (6 hours ahead). Ask about a time before then.`;
   const at = typeof tgt === "number" ? F.reduce((a, r) => (Math.abs(r.t - tgt) < Math.abs(a.t - tgt) ? r : a)) : null;
   const night = F.filter((r) => r.radiation_w_m2 < 10), rows = tgt === "night" && night.length ? night : F;
   const when = at ? `At ${fTime.format(at.t)}` : tgt === "night" ? `Tonight (until ${fTime.format(end)})` : `In the next 6 hours (until ${fTime.format(end)})`;
@@ -704,9 +664,9 @@ function futureAnswer(ql) {
     return `${when} heating stays about ${span(lo.heating_w_m2, hi.heating_w_m2)} W/m² (now ${r0(L.heating_w_m2)}).` + made;
   }
   if (has("vent", "window", "open")) {
-    if (at) return `${when} the vents should be at ${f1(at.ventilation_mm_s)} mm/s (indoor ${f1(at.temp_c)} °C, ${r0(at.rh_pct)} % humidity).` + made;
+    if (at) return `${when} the vents should be at about ${f1(at.ventilation_mm_s)} mm/s (indoor about ${r0(at.temp_c)} °C, ${r0(at.rh_pct)} % humidity).` + made;
     const v = runs(rows, (r) => r.ventilation_mm_s > 0.5, 0, 16 * 60e3)[0];
-    if (v) return `Yes — the controller plans to open the vents more (up to ${f1(Math.max(...rows.slice(v[0], v[1] + 1).map((r) => r.ventilation_mm_s)))} mm/s) from about ${fTime.format(rows[v[0]].t)} to ${fTime.format(rows[v[1]].t)}, when indoor reaches ${f1(Math.max(...rows.slice(v[0], v[1] + 1).map((r) => r.temp_c)))} °C.` + made;
+    if (v) return `Yes — the controller plans to open the vents more (up to about ${f1(Math.max(...rows.slice(v[0], v[1] + 1).map((r) => r.ventilation_mm_s)))} mm/s) from about ${fTime.format(rows[v[0]].t)} to ${fTime.format(rows[v[1]].t)}, when indoor reaches about ${r0(Math.max(...rows.slice(v[0], v[1] + 1).map((r) => r.temp_c)))} °C.` + made;
     return `No — no big vent openings are planned ${when.toLowerCase()}; they stay at about ${span(...ext("ventilation_mm_s"), 2)} mm/s to hold humidity at ${LIM.rh_max} %.` + made;
   }
   if (has("humid", "moist", "wet")) {
@@ -715,18 +675,19 @@ function futureAnswer(ql) {
   }
   if (has("co2", "co₂", "carbon")) {
     const dosing = (r) => r.co2_supply_mg_m2_s > 0.01, sw = rows.find((r) => dosing(r) !== dosing(L));
-    if (at) return `${when} indoor CO₂ should be ${r0(at.co2_ppm)} ppm with dosing ${dosing(at) ? "on" : "off"} (outdoor ${r0(at.co2_out_ppm)} ppm).` + made;
-    return `${when} indoor CO₂ should be ${span(...ext("co2_ppm"))} ppm` + (sw ? `; dosing will ${dosing(sw) ? "start" : "stop"} around ${fTime.format(sw.t)}.` : ".") + made;
+    const r10 = (x) => Math.round(x / 10) * 10;
+    if (at) return `${when} indoor CO₂ should be about ${r10(at.co2_ppm)} ppm with dosing ${dosing(at) ? "on" : "off"} (outdoor about ${r10(at.co2_out_ppm)} ppm).` + made;
+    return `${when} indoor CO₂ should be about ${r10(Math.min(...rows.map((r) => r.co2_ppm)))}–${r10(Math.max(...rows.map((r) => r.co2_ppm)))} ppm` + (sw ? `; dosing will ${dosing(sw) ? "start" : "stop"} around ${fTime.format(sw.t)}.` : ".") + made;
   }
-  if (has("grow", "harvest", "yield", "weight", "lettuce")) return "The forecast covers the climate and the equipment, not lettuce growth. Ask about temperature, humidity, CO₂, heating or vents.";
+  if (has("grow", "harvest", "yield", "weight", "lettuce")) return "The controller's plan covers the climate and the equipment, not lettuce growth. Ask about temperature, humidity, CO₂, heating or vents.";
   // temperature or general
-  if (at) return `${when} the greenhouse should be ${f1(at.temp_c)} °C (allowed ${r0(at.limit_temp_min)}–${r0(at.limit_temp_max)} °C) with ${f1(at.temp_out_c)} °C outdoors and heating at ${r0(at.heating_w_m2)} W/m².` + made;
+  if (at) return `${when} the greenhouse should be about ${r0(at.temp_c)} °C (allowed ${r0(at.limit_temp_min)}–${r0(at.limit_temp_max)} °C) with about ${r0(at.temp_out_c)} °C outdoors and heating at about ${r0(at.heating_w_m2)} W/m².` + made;
   const lim = rows.find((r) => Math.abs(r.limit_temp_min - L.limit_temp_min) > 0.5);
   const cold = rows.find((r) => r.temp_c < r.limit_temp_min - 0.3), warm = rows.find((r) => r.temp_c > r.limit_temp_max + 0.3);
-  return `${when} the greenhouse should stay at ${span(...ext("temp_c"), 1)} °C while it is ${span(...ext("temp_out_c"), 1)} °C outdoors` +
+  return `${when} the greenhouse should stay at about ${span(...ext("temp_c"))} °C while it is about ${span(...ext("temp_out_c"))} °C outdoors` +
     (lim ? `; the ${lim.limit_temp_min > L.limit_temp_min ? "daytime" : "night"} limits (${r0(lim.limit_temp_min)}–${r0(lim.limit_temp_max)} °C) start around ${fTime.format(lim.t)}` : "") +
-    (cold ? `; it may dip below the minimum around ${fTime.format(cold.t)} (${f1(cold.temp_c)} °C)` : "") +
-    (warm ? `; it may go above the maximum around ${fTime.format(warm.t)} (${f1(warm.temp_c)} °C)` : "") + "." + made;
+    (cold ? `; it may dip below the minimum around ${fTime.format(cold.t)}` : "") +
+    (warm ? `; it may go above the maximum around ${fTime.format(warm.t)}` : "") + "." + made;
 }
 
 function liveAnswer(q) {
@@ -781,7 +742,7 @@ function liveContext(q) {
   const topics = { heating: ["heat"], temperature: ["temperat", "warm", "cold", "hot", "okay"], humidity: ["humid"], ventilation: ["vent", "window", "open"], co2: ["co2", "co₂"] };
   const named = Object.keys(topics).filter((k) => topics[k].some((w) => ql.includes(w)));
   if (isFuture(ql + " ") && S.fc.rows.length) {
-    lines.push(`Controller forecast made at ${fTime.format(fcMade())} (it assumes the weather forecast is right):`);
+    lines.push(`The controller's plan made at ${fTime.format(fcMade())} (a plan, not a certainty; it depends on the weather forecast; give rounded numbers):`);
     forecastEvents().forEach((e) => lines.push(`- ${e.x}`));
   } else {
     makeFacts().filter((f) => f.v !== "day" && f.v !== "forecast" && (!named.length || named.includes(f.v))).slice(0, 4).forEach((f) => lines.push(`- ${f.x}`));

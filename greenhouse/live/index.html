@@ -74,8 +74,7 @@
           <div id="now"></div>
         </div>
         <div class="card" id="fc-card">
-          <h3 class="flush">Next 6 hours <span class="muted tiny">· forecast by the controller (MPC)</span></h3>
-          <div id="fc-table"></div>
+          <h3 class="flush">Controller's plan <span class="muted tiny">· next 6 hours</span></h3>
           <ul class="events" id="fc-events"></ul>
           <p class="muted tiny" id="fc-note"></p>
         </div>
@@ -92,17 +91,6 @@
       </section>
 
       <section class="tab" id="tab-charts">
-        <h2 class="flush">Next 6 hours <span class="muted tiny">· solid = measured (last hour), dashed = forecast</span></h2>
-        <p class="muted tiny" id="fc-chart-note"></p>
-        <h3>Temperature (°C) <span class="muted">· band = allowed indoor range</span></h3>
-        <div class="chart"><canvas id="f-temp"></canvas></div>
-        <h3>Humidity (%)</h3>
-        <div class="chart small"><canvas id="f-rh"></canvas></div>
-        <h3>Heating (W/m²) <span class="muted">· the controller's plan</span></h3>
-        <div class="chart small"><canvas id="f-heat"></canvas></div>
-        <h3>Indoor CO₂ (ppm)</h3>
-        <div class="chart small"><canvas id="f-co2"></canvas></div>
-        <h2>History <span class="muted tiny" id="hist-label"></span></h2>
         <p class="muted" id="chart-note"></p>
         <h3>Temperature (°C) <span class="muted">· band = allowed indoor range</span></h3>
         <div class="chart"><canvas id="l-temp"></canvas></div>
@@ -154,7 +142,7 @@
       <section class="tab" id="tab-facts">
         <label class="field">Topic
           <select id="topic">
-            <option value="all">All</option><option value="forecast">Forecast (next 6 h)</option>
+            <option value="all">All</option><option value="forecast">Plan (next 6 h)</option>
             <option value="day">Daily summaries</option>
             <option value="temperature">Temperature</option><option value="humidity">Humidity</option>
             <option value="heating">Heating</option><option value="ventilation">Vents</option>
