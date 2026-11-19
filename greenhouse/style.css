@@ -77,3 +77,25 @@ h3.flush { margin-top: 0; }
 .cmp td { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .cmp tbody tr:last-child > * { border-bottom: 0; }
 #lock h2 { margin-top: .2rem; }
+.top-actions { display: flex; gap: 6px; flex-shrink: 0; }
+a.btn { text-decoration: none; display: inline-block; }
+/* live monitor */
+.status-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.status-row p { margin: .4rem 0; font-size: .9rem; }
+.status-row .btn, .top-actions .btn { white-space: nowrap; flex-shrink: 0; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; background: var(--muted); vertical-align: 1px; }
+.dot.ok { background: #1f9d55; } .dot.warn { background: #E69F00; } .dot.bad { background: #D55E00; }
+.alert { border-radius: 8px; padding: .55rem .75rem; margin: .45rem 0; font-size: .92rem; border: 1px solid var(--line); background: var(--panel); }
+.alert.ok { border-left: 4px solid #1f9d55; }
+.alert.info { border-left: 4px solid var(--accent); }
+.alert.warn { border-left: 4px solid #E69F00; background: rgba(230, 159, 0, .10); }
+.alert.bad { border-left: 4px solid #D55E00; background: rgba(213, 94, 0, .12); }
+.chip { display: inline-block; font-size: .72rem; font-weight: 600; padding: 1px 7px; border-radius: 999px; vertical-align: 2px; }
+.chip.ok { background: rgba(31, 157, 85, .15); color: #1f7a4d; }
+.chip.warn { background: rgba(213, 94, 0, .15); color: #b34a00; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .chip.ok { color: #5cc28f; } :root:not([data-theme="light"]) .chip.warn { color: #f0a46b; } }
+:root[data-theme="dark"] .chip.ok { color: #5cc28f; } :root[data-theme="dark"] .chip.warn { color: #f0a46b; }
+.seg { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin: 6px 0; }
+.seg button { padding: 8px 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); font-size: .9rem; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+.cmp td .chip { margin-left: 4px; }
