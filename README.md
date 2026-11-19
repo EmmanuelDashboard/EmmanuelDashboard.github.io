@@ -2,8 +2,8 @@
 
 A web dashboard for diagonal thinning of pecan orchards from drone images. Drop a drone image of any pecan orchard and it finds:
 
-- the pecan canopy (no grass, soil or shadow);
-- every crown;
+- the pecan canopy (never grass, soil or shadow);
+- every crown, **young replanted trees included**: a small, round, sunlit crown as green as the pecan leaves, standing on an empty planting position on clean bare ground or casting its own shadow (flag YOUNG_TREE);
 - the planting grid;
 - the EVEN / ODD thinning diagonals (along every row the crowns alternate blue, red, blue, also across a missing tree);
 - the canopy total of each diagonal;
@@ -37,9 +37,9 @@ Drop the orthomosaic and its DSM together (hold <kbd>Ctrl</kbd> to select both),
 
 - **The drone image** with every pecan crown tinted in the colour of its diagonal: blue for EVEN, red for ODD. Along each planted row the crowns alternate blue, red, blue.
 - **The wavy thinning diagonals.** Each one runs from its first tree to its last tree and ends in an arrow.
-- **The canopy total (m²) of each diagonal**, written at the end of its line (zoom in to read it), plus a table and a chart.
-- **EVEN, ODD and overall totals**: canopy area, crowns and diagonals.
-- **Where to start.** Thinning removes the family (EVEN or ODD) with the smaller total canopy and starts on its first diagonal: D01 when ODD is smaller, D02 when EVEN is smaller. The start line is drawn thick with a START label and an arrow for the direction of travel; you can pick another one, and the thinning plan follows it. *Start only* hides the other lines.
+- **The canopy total (ft²) of each diagonal**, written at the end of its line (zoom in to read it), plus a table, a chart per diagonal and an EVEN vs ODD total chart.
+- **EVEN, ODD and overall totals**: canopy area (ft²), crowns and diagonals. Field area in acres, spacing and heights in feet (design 20 × 40 ft).
+- **Where to start.** Thinning removes the family (EVEN or ODD) with the smaller total canopy and starts on its first diagonal: D01 when ODD is smaller, D02 when EVEN is smaller. The start line is drawn thick with an arrow for the direction of travel and a small black "start" just beyond its first end; you can pick another one, and the thinning plan follows it. *Start only* hides the other lines.
 
 ## Corrections
 
@@ -56,8 +56,10 @@ Undo and redo with <kbd>Ctrl</kbd>+<kbd>Z</kbd> and <kbd>Ctrl</kbd>+<kbd>Y</kbd>
 
 ## Export
 
-- **Trees to remove (CSV with GPS)**, for the field crew.
-- **Canopy per diagonal (CSV):** one row per diagonal, then the EVEN, ODD and ALL totals at the end.
+- **Trees to remove (CSV with GPS)**, for the field crew (canopy in ft², height in ft, young trees marked).
+- **Result map image (JPG):** the whole field with crowns, diagonals, the start line, canopy (ft²) per line and the totals.
+- **EVEN vs ODD total chart (JPG).**
+- **Canopy per diagonal (CSV, ft²):** one row per diagonal, then the EVEN, ODD and ALL totals at the end.
 - **Crowns table (CSV)** and **corrected crowns (GeoJSON, WGS84)**, for GIS software.
 - **Corrections log (CSV).**
 - **Print / save the map as PDF.**

@@ -1278,15 +1278,33 @@
       state.startArrow.addTo(layers.start);
       if (state.loaded) styleLinesForZoom();
     }
-    const top = diagonalTop(d);
-    if (top) {
-      L.marker(toLL(top), {
-        icon: L.divIcon({ className: "start-label", html: `<span>START<br>${dname(d.number)} (${d.family})</span>`, iconSize: [0, 0] }),
+    const at = startLabelPoint(d);
+    if (at) {
+      L.marker(toLL(at), {
+        icon: L.divIcon({ className: "start-label", html: "<span>start</span>", iconSize: [0, 0] }),
         interactive: false,
         keyboard: false,
         zIndexOffset: 1000,
       }).addTo(layers.start);
     }
+  }
+
+  // Where the word "start" goes: just beyond the first (upper) end of the
+  // start line, continuing the line outward, so it sits off the crowns.
+  function startLabelPoint(d, gapM = 2.5) {
+    let best = null;
+    for (const piece of d.pieces) {
+      if (piece.length < 2) continue;
+      for (const [i, step] of [[0, 1], [piece.length - 1, -1]]) {
+        const tip = piece[i];
+        if (best && tip[1] <= best.tip[1]) continue;
+        let k = i + step, back = piece[k];
+        while (k > 0 && k < piece.length - 1 && Math.hypot(back[0] - tip[0], back[1] - tip[1]) < 3) { k += step; back = piece[k]; }
+        const len = Math.hypot(tip[0] - back[0], tip[1] - back[1]) || 1;
+        best = { tip, dir: [(tip[0] - back[0]) / len, (tip[1] - back[1]) / len] };
+      }
+    }
+    return best ? [best.tip[0] + best.dir[0] * gapM, best.tip[1] + best.dir[1] * gapM] : null;
   }
 
   function drawSelection() {
@@ -2287,17 +2305,16 @@
       if (start && start.pieces.length) {
         for (const piece of start.pieces) drawLine(piece, LINE_COLORS[start.family], 2.4 * lineW);
         if (start.end) drawArrow(start.end, LINE_COLORS[start.family], 8);
-        const top = diagonalTop(start);
-        if (top) {
-          const text = `START ${dname(start.number)} (${start.family})`;
-          ctx.font = `700 ${Math.round(22 * unit)}px system-ui, sans-serif`;
-          const tw = ctx.measureText(text).width, th = 30 * unit;
-          let bx = X(top[0]) - tw - 24 * unit, by = Y(top[1]) - th - 14 * unit;
-          bx = Math.max(6, Math.min(W - tw - 22 * unit, bx)); by = Math.max(6, by);
-          ctx.fillStyle = "rgba(255,255,255,0.95)"; ctx.strokeStyle = "#263747"; ctx.lineWidth = 2 * unit;
-          ctx.fillRect(bx, by, tw + 16 * unit, th); ctx.strokeRect(bx, by, tw + 16 * unit, th);
-          ctx.fillStyle = "#1a2a36"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
-          ctx.fillText(text, bx + 8 * unit, by + th / 2);
+        const at = startLabelPoint(start, 3);
+        if (at) {
+          // Small black "start" just beyond the first end of the line.
+          ctx.font = `700 ${Math.max(10, Math.round(12 * unit))}px system-ui, sans-serif`;
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          const lx = Math.max(30 * unit, Math.min(W - 30 * unit, X(at[0]))), ly = Math.max(12 * unit, Math.min(Hmap - 12 * unit, Y(at[1])));
+          ctx.lineWidth = Math.max(2, 3 * unit); ctx.strokeStyle = "rgba(255,255,255,0.95)";
+          ctx.strokeText("start", lx, ly);
+          ctx.fillStyle = "#000000";
+          ctx.fillText("start", lx, ly);
         }
       }
 

@@ -1513,10 +1513,11 @@
         for (const i of list) own[(((i / w) | 0) - y0) * bw + (i % w) - x0] = 1;
         const grown = dilate(own, bw, bh, r);
         const out = [];
+        out.luma = [];
         for (let k = 0; k < bw * bh; k++) {
           if (!grown[k] || own[k]) continue;
           const i = (((k / bw) | 0) + y0) * w + (k % bw) + x0;
-          if (valid[i] && !labels[i]) out.push(exgAt(i));
+          if (valid[i] && !labels[i]) { out.push(exgAt(i)); out.luma.push(lumaAt(i)); }
         }
         return out;
       };
@@ -1536,7 +1537,11 @@
           const own25 = percentile(greens.get(l), 25), own75 = percentile(greens.get(l), 75);
           const asGreen = ring.filter((v) => v >= own25).length / ring.length;
           if (asGreen > 0.12 || own75 - percentile(ring, 50) < 0.12) continue;
-        }
+          // Never ground: a young tree stands on clean bare ground, or it
+          // casts its own shadow beside it (a plant that stands up).
+          const ownShadow = ring.luma.filter((v) => v < 0.6 * (sumL[l] / cnt[l])).length / ring.length;
+          if (asGreen > 0.05 && ownShadow < 0.05) continue;
+        } else continue;
         const spot = [(sumX[l] / cnt[l] + 0.5) * pixel, (h - sumY[l] / cnt[l] - 0.5) * pixel];
         const near = [];
         const bx = Math.floor(spot[0] / cellM), by = Math.floor(spot[1] / cellM);
