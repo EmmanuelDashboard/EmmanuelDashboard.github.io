@@ -64,4 +64,16 @@ input[type="range"] { width: 100%; margin-top: 8px; accent-color: var(--accent);
 .ask { display: grid; grid-template-columns: 1fr auto; gap: 8px; position: sticky; bottom: 0; background: var(--bg); padding: 8px 0; }
 .ask input { margin: 0; }
 summary { cursor: pointer; font-weight: 600; }
-footer { margin-top: 28px; }
+.top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.btn.slim { padding: 6px 12px; font-size: .85rem; margin-top: 4px; }
+.btn:disabled { opacity: .6; cursor: wait; }
+h3.flush { margin-top: 0; }
+.tiny { font-size: .78rem; margin: .5rem 0 0; }
+.cmp { width: 100%; border-collapse: collapse; font-size: .95rem; }
+.cmp th, .cmp td { padding: 8px 6px; text-align: left; border-bottom: 1px solid var(--line); }
+.cmp thead th { font-size: .8rem; color: var(--muted); font-weight: 600; padding-top: 0; }
+.cmp thead th:nth-child(2) { color: var(--accent); }
+.cmp tbody th { font-weight: 600; font-size: .9rem; }
+.cmp td { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cmp tbody tr:last-child > * { border-bottom: 0; }
+#lock h2 { margin-top: .2rem; }

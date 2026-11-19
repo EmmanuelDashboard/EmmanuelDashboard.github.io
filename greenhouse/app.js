@@ -1,6 +1,8 @@
 "use strict";
 /* AI-Assisted Modern Greenhouse - static dashboard (GitHub Pages).
-   Data: data/series.json (15-min log), data/facts.json, data/meta.json, exported by ghnl.webexport. */
+   Data: data/bundle.bin, written by ghnl.webexport and ENCRYPTED with the dashboard password
+   (AES-256-GCM, key from PBKDF2-SHA256). It is decrypted here in the browser, so the public files
+   reveal nothing without the password. */
 
 const DT = 900, PER_DAY = 96;
 const S = { charts: {}, chat: [], models: null };
@@ -20,16 +22,72 @@ const sum = (a) => a.reduce((x, y) => x + y, 0);
 const r0 = (x) => Math.round(x), f1 = (x) => x.toFixed(1), f2 = (x) => x.toFixed(2);
 const span = (a, b) => (Math.round(a) < 0 || Math.round(b) < 0 ? `${r0(a)} to ${r0(b)}` : `${r0(a)}–${r0(b)}`);
 
-async function load() {
-  const [series, facts, meta] = await Promise.all(["series", "facts", "meta"].map(
-    (n) => fetch(`data/${n}.json`).then((r) => { if (!r.ok) throw new Error(n); return r.json(); })));
+// ---------------- password lock
+const saved = {
+  get() { try { return sessionStorage.getItem("ghPw") || localStorage.getItem("ghPw") || ""; } catch { return ""; } },
+  kept() { try { return !!localStorage.getItem("ghPw"); } catch { return false; } },
+  set(pw, keep) { try { sessionStorage.setItem("ghPw", pw); if (keep) localStorage.setItem("ghPw", pw); else localStorage.removeItem("ghPw"); } catch { /* storage blocked */ } },
+  clear() { try { sessionStorage.removeItem("ghPw"); localStorage.removeItem("ghPw"); } catch { /* storage blocked */ } },
+};
+let bundle = null;
+
+async function decryptData(pw) {
+  if (!bundle) {
+    const r = await fetch("data/bundle.bin", { cache: "no-cache" });
+    if (!r.ok) throw new Error(`data file missing (${r.status})`);
+    bundle = new Uint8Array(await r.arrayBuffer());
+  }
+  if (String.fromCharCode(...bundle.subarray(0, 4)) !== "GHE1") throw new Error("unknown data file");
+  const rounds = new DataView(bundle.buffer, bundle.byteOffset).getUint32(4);
+  const salt = bundle.slice(8, 24), iv = bundle.slice(24, 36), ct = bundle.slice(36);
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveKey"]);
+  const key = await crypto.subtle.deriveKey({ name: "PBKDF2", hash: "SHA-256", salt, iterations: rounds },
+    base, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+  let plain;
+  try { plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ct); }
+  catch { const e = new Error("wrong password"); e.wrong = true; throw e; }
+  const text = await new Response(new Blob([plain]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
+  return JSON.parse(text);
+}
+
+async function tryUnlock(pw, keep) {
+  const msg = $("lock-msg"), btn = $("unlock");
+  if (!(window.crypto && crypto.subtle && window.DecompressionStream)) {
+    msg.textContent = "This browser is too old to open the dashboard. Please update it (or use Chrome, Edge, Safari or Firefox).";
+    return;
+  }
+  btn.disabled = true; msg.textContent = "Opening…";
+  try {
+    const data = await decryptData(pw);
+    saved.set(pw, keep);
+    $("lock").hidden = true; $("app").hidden = false; $("lock-btn").hidden = false;
+    start(data);
+  } catch (e) {
+    if (e.wrong) { saved.clear(); msg.textContent = "Wrong password. Please try again."; $("pw").select(); }
+    else msg.textContent = `Could not open the data (${e.message}). Check the internet connection and try again.`;
+  } finally { btn.disabled = false; }
+}
+
+function boot() {
+  $("lock-form").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const pw = $("pw").value.trim();
+    if (pw) tryUnlock(pw, $("pw-remember").checked); else $("lock-msg").textContent = "Type the password first.";
+  });
+  $("lock-btn").addEventListener("click", () => { saved.clear(); location.reload(); });
+  const pw = saved.get();
+  if (pw) { $("pw-remember").checked = saved.kept(); tryUnlock(pw, saved.kept()); }
+}
+
+// ---------------- start (after the data is unlocked)
+function start({ series, facts, meta }) {
   S.d = series; S.n = series.n; S.t0ms = Date.parse(series.t0); S.meta = meta;
   S.facts = facts.map((f) => ({ ...f, t0: factMs(f.s), t1: factMs(f.e) }));
   S.first = ymd(tAt(0)); S.last = ymd(tAt(S.n - 1)); S.totalDays = Math.round(S.n / PER_DAY);
   $("note").textContent = `Lettuce greenhouse simulation · ${meta.weather_note} · the controller decides heating, vents and CO₂ every 15 minutes.`;
-  const start = $("start"); start.min = S.first; start.max = S.last; start.value = S.first;
+  const sd = $("start"); sd.min = S.first; sd.max = S.last; sd.value = S.first;
   const nd = $("ndays"); nd.max = S.totalDays;
-  start.addEventListener("change", update); nd.addEventListener("input", update);
+  sd.addEventListener("change", update); nd.addEventListener("input", update);
   document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
   $("topic").addEventListener("change", renderFacts);
   setupAsk();
@@ -71,22 +129,35 @@ function metric(label, value, delta) {
     (delta ? `<div class="delta">${delta}</div>` : "") + `</div>`;
 }
 
+function minmax(key, idx) {
+  let lo = Infinity, hi = -Infinity;
+  for (const i of idx) { const v = S.d[key][i]; if (v < lo) lo = v; if (v > hi) hi = v; }
+  return [lo, hi];
+}
+
 function renderSummary() {
-  const d = S.d, idx = range(S.i0, S.i1), last = S.i1 - 1;
-  const T = idx.map((i) => d.T[i]), To = idx.map((i) => d.To[i]);
-  const kwh = sum(idx.map((i) => d.H[i])) * DT / 3.6e6;
+  const d = S.d, m = S.meta, idx = range(S.i0, S.i1), last = S.i1 - 1;
+  const tot = (k) => { let s = 0; for (const i of idx) s += d[k][i]; return s; };
+  const kwh = tot("H") * DT / 3.6e6, co2g = tot("C") * DT / 1000;
+  const ventH = idx.filter((i) => d.V[i] > 0.1).length * 0.25;
   const crop = d.K[last]; let cs = last; while (cs > 0 && d.K[cs - 1] === crop) cs--;
   const age = Math.floor((last - cs) / PER_DAY) + 1;
   const crops = new Set(idx.map((i) => d.K[i])).size;
+  const row = (name, inside, outside) => `<tr><th scope="row">${name}</th><td>${inside}</td><td>${outside}</td></tr>`;
   $("sum-title").textContent = `Summary · ${S.label}`;
+  $("compare").innerHTML = `<table class="cmp"><thead><tr><th></th><th scope="col">Inside</th><th scope="col">Outside</th></tr></thead><tbody>` +
+    row("Temperature", `${span(...minmax("T", idx))} °C`, `${span(...minmax("To", idx))} °C`) +
+    row("Humidity", `${span(...minmax("RH", idx))} %`, `${span(...minmax("RHo", idx))} %`) +
+    row("CO₂", `${span(...minmax("CO2", idx))} ppm`, `${r0(m.co2_out_ppm)} ppm <span class="muted">(typical)</span>`) +
+    row("Sunlight", `<span class="muted">uses outside</span>`, `${f1(tot("R") * 0.25 / 1000)} kWh/m²`) + `</tbody></table>`;
+  $("compare-note").textContent = "Ranges are lowest–highest for the period. The model has no separate inside light value: " +
+    "crop growth and solar heating use the outside sunlight directly. Outside CO₂ is a typical value, not measured.";
   $("metrics").innerHTML =
-    metric("Greenhouse temperature", `${span(Math.min(...T), Math.max(...T))} °C`) +
-    metric("Outside temperature", `${span(Math.min(...To), Math.max(...To))} °C`) +
-    metric("Heating used", `${f2(kwh)} kWh/m²`, `${f2(kwh * S.meta.prices.heat_cad_per_kwh)} CAD/m²`) +
-    metric("Highest humidity", `${r0(Math.max(...idx.map((i) => d.RH[i])))} %`) +
-    metric("Sunlight", `${f1(sum(idx.map((i) => d.R[i])) * 0.25 / 1000)} kWh/m²`) +
+    metric("Heating used", `${f2(kwh)} kWh/m²`, `${f2(kwh * m.prices.heat_cad_per_kwh)} CAD/m²`) +
+    metric("CO₂ added", `${r0(co2g)} g/m²`, `${(co2g / 1000 * m.prices.co2_cad_per_kg).toFixed(3)} CAD/m²`) +
+    metric("Vents open", `${f1(ventH)} h`, `of ${f1(idx.length * 0.25)} h`) +
     metric(`Lettuce now · crop ${crop}, day ${age}`, `${r0(d.DW[last])} g/m²`,
-      `grew ${r0(sum(idx.map((i) => d.G[i])))} g/m² in this period${crops > 1 ? ` (${crops} crops)` : ""}`);
+      `grew ${r0(tot("G"))} g/m² in this period${crops > 1 ? ` (${crops} crops)` : ""}`);
   const a = tAt(S.i0).getTime(), b = tAt(S.i1 - 1).getTime();
   const daily = S.facts.filter((f) => f.k === "daily" && f.t0 >= a - 1 && f.t0 <= b).sort((x, y) => x.t0 - y.t0);
   $("daily").innerHTML = daily.slice(0, 7).map((f) => `<div class="fact">${esc(f.x)}</div>`).join("") +
@@ -140,20 +211,22 @@ function chart(id, datasets, opts = {}) {
 function renderCharts() {
   if (typeof Chart === "undefined") { $("chart-note").textContent = "Charts need an internet connection to load."; return; }
   const k = bucket();
-  $("chart-note").textContent = `Tap or hover on a chart to see the values · ${k === 1 ? "every 15 min" : k === 2 ? "30-min averages" : k === 4 ? "hourly averages" : k === 24 ? "6-hour averages" : "daily averages"}.`;
+  $("chart-note").textContent = `Grey line = outside, coloured line = inside. Tap or hover on a chart to see the values · ${k === 1 ? "every 15 min" : k === 2 ? "30-min averages" : k === 4 ? "hourly averages" : k === 24 ? "6-hour averages" : "daily averages"}.`;
   const flat = (v) => labels().map(() => v);
   chart("c-temp", [
     { label: "min", data: series("Tmin"), borderColor: "transparent", pointRadius: 0, hideLegend: true },
     { label: "max", data: series("Tmax"), borderColor: "transparent", backgroundColor: "rgba(0,114,178,.13)", fill: "-1", hideLegend: true },
-    { label: "Greenhouse", data: series("T"), borderColor: COL.blue },
+    { label: "Inside", data: series("T"), borderColor: COL.blue },
     { label: "Outside", data: series("To"), borderColor: COL.grey },
-  ], { y: { title: { display: true, text: "°C" } } });
-  chart("c-rh", [{ label: "Humidity", data: series("RH"), borderColor: COL.green },
+  ]);
+  chart("c-rh", [{ label: "Inside", data: series("RH"), borderColor: COL.green },
+    { label: "Outside", data: series("RHo"), borderColor: COL.grey },
     { label: "max", data: flat(S.meta.limits.rh_max), borderColor: COL.red, borderDash: [5, 4], borderWidth: 1.5, hideLegend: true }]);
+  chart("c-co2", [{ label: "Inside", data: series("CO2"), borderColor: COL.pink },
+    { label: "Outside", data: flat(S.meta.co2_out_ppm), borderColor: COL.grey }]);
+  chart("c-sun", [{ label: "Outside", data: series("R"), borderColor: COL.gold, backgroundColor: "rgba(230,159,0,.3)", fill: true }]);
   chart("c-heat", [{ label: "Heating", data: series("H"), borderColor: COL.red, backgroundColor: "rgba(213,94,0,.25)", fill: true }]);
   chart("c-vent", [{ label: "Ventilation", data: series("V"), borderColor: COL.sky, backgroundColor: "rgba(86,180,233,.3)", fill: true }]);
-  chart("c-sun", [{ label: "Sunlight", data: series("R"), borderColor: COL.gold, backgroundColor: "rgba(230,159,0,.3)", fill: true }]);
-  chart("c-co2", [{ label: "CO₂", data: series("CO2"), borderColor: COL.pink }]);
 }
 
 // ---------------- facts
@@ -207,10 +280,10 @@ function quickAnswer(q) {
     }
     return `On ${when} heating used ${f2(kwh)} kWh/m² (${f2(cad)} CAD/m²), averaging ${r0(sum(idx.map((i) => d.H[i])) / idx.length)} W/m² while it was ${r0(oLo)} to ${r0(oHi)} °C outside.`;
   }
-  if (has("humid", "moist")) return `On ${when} humidity reached ${r0(Math.max(...idx.map((i) => d.RH[i])))} %; it sat at the ${r0(L.rh_max)} % limit for ${f1(rhH)} h and the controller held it there with small vent openings.`;
+  if (has("humid", "moist")) return `On ${when} humidity inside reached ${r0(Math.max(...idx.map((i) => d.RH[i])))} % (outside it was ${span(...minmax("RHo", idx))} %); it sat at the ${r0(L.rh_max)} % limit for ${f1(rhH)} h and the controller held it there with small vent openings.`;
   if (has("co2", "co₂", "carbon")) {
     const c = idx.map((i) => d.CO2[i]);
-    return `On ${when} CO₂ ranged ${r0(Math.min(...c))}–${r0(Math.max(...c))} ppm: the controller added ${r0(sum(idx.map((i) => d.C[i])) * DT / 1000)} g/m² in daylight, when it helps the lettuce grow.`;
+    return `On ${when} CO₂ inside ranged ${r0(Math.min(...c))}–${r0(Math.max(...c))} ppm (outside about ${r0(S.meta.co2_out_ppm)} ppm): the controller added ${r0(sum(idx.map((i) => d.C[i])) * DT / 1000)} g/m² in daylight, when it helps the lettuce grow.`;
   }
   if (has("grow", "harvest", "yield", "weight", "lettuce")) {
     const last = idx[idx.length - 1];
@@ -372,4 +445,4 @@ async function ask(q) {
 
 function esc(s) { return String(s).replace(/–-/g, " to -").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
-load().catch((e) => { $("note").textContent = `Could not load the data (${e.message}). Please reload the page.`; });
+boot();
