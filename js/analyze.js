@@ -708,9 +708,21 @@
         const fits = found.filter((f) => Math.abs(perp(f.v) / P - 1) <= 0.12 && cross(a, f.v) > Math.sin((20 * Math.PI) / 180));
         if (fits.length) b = fits.reduce((p, q) => (q.s > p.s ? q : p)).v;
         else {
-          // no tree pair across the rows at that distance: step straight across
+          // step across one row; how far the next row is shifted along the
+          // row comes from the tree pairs one row apart (circular mean)
           const sgn = b[0] * across[0] + b[1] * across[1] < 0 ? -1 : 1;
-          b = [sgn * P * across[0], sgn * P * across[1]];
+          const ia = len(a);
+          let cs = 0, sn = 0;
+          for (const [i, j] of pairsWithin(points, 1.3 * P)) {
+            let dx = points[j][0] - points[i][0], dy = points[j][1] - points[i][1];
+            let pp = dx * across[0] + dy * across[1];
+            if (pp < 0) { dx = -dx; dy = -dy; pp = -pp; }
+            if (Math.abs(pp / P - 1) > 0.15) continue;
+            const along = dx * ah[0] + dy * ah[1], ang = (2 * Math.PI * along) / ia;
+            cs += Math.cos(ang); sn += Math.sin(ang);
+          }
+          const shift = Math.hypot(cs, sn) > 0 ? (Math.atan2(sn, cs) / (2 * Math.PI)) * ia : 0;
+          b = [sgn * (P * across[0] + shift * ah[0]), sgn * (P * across[1] + shift * ah[1])];
         }
       }
     }
@@ -1353,6 +1365,37 @@
     const gp = gridPositions(gridPts, a, b);
     const pos = Array.from({ length: count }, () => null);
     gridIdx.forEach((t, k) => { if (gp.placed[k]) pos[t] = gp.pos[k]; });
+    // A tree whose top is a little off its planting position (a big or
+    // leaning crown) takes the nearest empty position, as its placed
+    // neighbours see it, instead of being merged into a neighbour.
+    {
+      const I0 = inv2(a, b), taken0 = new Set();
+      const placedT = [];
+      for (let t = 0; t < count; t++) if (pos[t]) { taken0.add(pos[t][0] + "," + pos[t][1]); placedT.push(t); }
+      const medSize = percentile(placedT.map((t) => sizes[t + 1]), 50) || 1;
+      const cand = [];
+      for (let t = 0; t < count; t++) {
+        if (pos[t] || !eligible[t] || sizes[t + 1] < 0.25 * medSize) continue;
+        const near = placedT.map((s) => [Math.hypot(pts[s][0] - pts[t][0], pts[s][1] - pts[t][1]), s]).sort((p, q) => p[0] - q[0]).slice(0, 6);
+        if (near.length < 2 || near[0][0] > 3 * len(b)) continue;
+        const us = [], vs = [];
+        for (const [, s] of near) {
+          const ex = pts[t][0] - pts[s][0], ey = pts[t][1] - pts[s][1];
+          us.push(pos[s][0] + I0[0][0] * ex + I0[0][1] * ey);
+          vs.push(pos[s][1] + I0[1][0] * ex + I0[1][1] * ey);
+        }
+        const u = percentile(us, 50), v = percentile(vs, 50), p = Math.round(u), q = Math.round(v);
+        if (Math.abs(v - q) > 0.3 || Math.abs(u - p) > 0.5) continue;
+        cand.push({ t, p, q, err: Math.abs(u - p) });
+      }
+      cand.sort((x, y) => x.err - y.err);
+      for (const c of cand) {
+        const key = c.p + "," + c.q;
+        if (taken0.has(key)) continue;
+        taken0.add(key);
+        pos[c.t] = [c.p, c.q];
+      }
+    }
 
     // Label helpers.
     const relabel = (from, to) => {
@@ -1660,7 +1703,10 @@
       for (const t of refs) placed.set(siteOf(pos[t]), pts[t]);
       for (const e of extra) placed.set(siteOf(e.pos), e.spot);
       const rowSp = len(b);
-      const rIn = 0.25 * inRow, rOut = rIn + 1.5, R = Math.ceil(rOut / pixel), bw = 2 * R + 1;
+      // search radius: a quarter of the tree spacing; a third where the
+      // trees stand irregularly along their rows (positions less exact)
+      const fitErr = percentile(Array.from(gp.fitM).filter(Number.isFinite), 50) || 0;
+      const rIn = (fitErr > 0.12 * inRow ? 0.35 : 0.25) * inRow, rOut = rIn + 1.5, R = Math.ceil(rOut / pixel), bw = 2 * R + 1;
       const free = (k) => valid[k] && !labels[k] && !trimmedAway[k];
       const compOf = new Int32Array(bw * bw);
       // where a tree at grid position (p, q) stands (p may be fractional)
@@ -1737,6 +1783,14 @@
       };
       // the sapling searched within rIn of a spot (null: none, or not
       // searchable); L = the rules
+      // Neighbours of a leaf pixel. On a sharp image (under 12 cm) the
+      // leaves of one young tree are parted by bits of soil: leaves up to
+      // 15 cm apart belong together.
+      const hop = [];
+      {
+        if (pixel > 0.12) hop.push([-1, 0], [1, 0], [0, -1], [0, 1]);
+        else for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (dx || dy) hop.push([dx, dy]);  // touching corners too
+      }
       // distance (pixels) from every open pixel to the nearest crown
       const toCrown = (() => { const open = new Uint8Array(n); for (let i = 0; i < n; i++) open[i] = labels[i] ? 0 : 1; return edt(open, w, h); })();
       const findSapling = (sx, sy, L) => {
@@ -1778,7 +1832,7 @@
             while (stack.length) {
               const u = stack.pop(), ux = u % w, uy = (u / w) | 0;
               list.push(u);
-              for (const [vx, vy] of [[ux - 1, uy], [ux + 1, uy], [ux, uy - 1], [ux, uy + 1]]) {
+              for (const [vx, vy] of hop.map(([dx, dy]) => [ux + dx, uy + dy])) {
                 const v = vy * w + vx;
                 if (vx < cc - R || vx > cc + R || vy < rr - R || vy > rr + R) { leak++; continue; }
                 const kk = (vy - rr + R) * bw + (vx - cc + R);
@@ -1809,14 +1863,14 @@
               }
             }
             if (Math.sqrt(reach2) * pixel > 0.45 * inRow) continue;       // compact, not a strip
-            if (list.length / (Math.PI * Math.max(reach2, 1)) < L.round) continue;
+            if (list.length / (Math.PI * Math.max(reach2, 1)) < (hop.length > 4 ? 0.15 : L.round)) continue; // (leaves with soil between: less filled)
             if (touch2 > 0.15 * edge2) continue;                          // not the edge of a big crown
             let gapC = Infinity, lum = 0;
             for (const u of list) { if (toCrown[u] < gapC) gapC = toCrown[u]; lum += lumaAt(u); }
             if (gapC * pixel < 0.4) continue;                             // stands apart from the big crowns
             lum /= list.length;
             if (lum < thresholds.darkY || lum < 0.7 * bgYmed) continue;   // sunlit, not leaves in a shadow
-            if (leak > L.leak * edge2) continue;                          // not part of a band of grass
+            if (leak > (L.leak * edge2 * hop.length) / 4) continue;       // not part of a band of grass
             const ring = ringGreens(list, 0.6);
             if (!ring.length) continue;
             // on mostly bare ground: a greener patch with grass all round is grass
@@ -2287,7 +2341,18 @@
       // the diagonal itself (after a smooth bend inside the crown), so it
       // ends, and its arrow points, along the diagonal.
       const tail = (s, length) => { const s0 = Math.min(1.5, 0.5 * length); return s <= s0 ? (s * s) / (2 * s0) : s - s0 / 2; };
-      const lenB = vk[0] - begin, lenE = end - vk[vk.length - 1];
+      // ... and on to the edge of the field (not ending in the middle)
+      const toEdgeAlong = (u0, v0, dir) => {
+        let d = 0;
+        for (let s = 0.5; s < 2000; s += 0.5) {
+          const [x, y] = toXY(u0 + dir * slope * s, v0 + dir * s);
+          if (!validAt(x, y)) break;
+          d = s;
+        }
+        return d + 0.5;
+      };
+      const lenB = Math.max(vk[0] - begin, toEdgeAlong(uk[0], vk[0], -1));
+      const lenE = Math.max(end - vk[vk.length - 1], toEdgeAlong(uk[uk.length - 1], vk[vk.length - 1], 1));
       const line = [];
       const nb = Math.max(3, Math.ceil(lenB / 0.25));
       for (let s = 0; s < nb; s++) { const d = lenB * (1 - s / nb); line.push([uk[0] - slope * tail(d, lenB), vk[0] - d]); }
@@ -2491,6 +2556,11 @@
       }
     }
     untangle(false);
+    // last: gentle smoothing of every line (no kinks), order kept
+    for (let round = 0; round < 2; round++) {
+      for (const s of samples.values()) s.u = smooth(s.u);
+      untangle(false);
+    }
     let linesMoved = 0;
     for (const s of samples.values()) for (let i = 0; i < s.u.length; i++) if (Math.abs(s.u[i] - s.u0[i]) > 0.05) linesMoved++;
     // Only the ends of a line are cut at the edge of the field.
@@ -2632,6 +2702,7 @@
       diagonals: [...lines.entries()].map(([number, pieces3]) => ({ number, pieces: pieces3 })),
       settings: {
         in_row_spacing_m: inRow,
+        grid_vectors_m: { in_row: a, across: b },
         row_spacing_m: rowSpacing,
         row_bearing_deg: bearing(a),
         diagonal_bearing_deg: bearing(vector),
