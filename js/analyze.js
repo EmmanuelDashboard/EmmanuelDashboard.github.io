@@ -1710,18 +1710,53 @@
       const free = (k) => valid[k] && !labels[k] && !trimmedAway[k];
       const compOf = new Int32Array(bw * bw);
       // where a tree at grid position (p, q) stands (p may be fractional)
+      // Rows searched for young trees: every row of the block, along its
+      // whole length (as long as the rows beside it), also a row with few
+      // or no big trees (a row of replants). Spots outside the field are
+      // skipped by the search itself.
+      const searchRows = new Map();
+      {
+        const qs = [...rowRange.keys()];
+        const qLo = Math.min(...qs), qHi = Math.max(...qs);
+        for (let q = qLo - 1; q <= qHi + 1; q++) {
+          let lo = Infinity, hi = -Infinity;
+          for (let dq = -2; dq <= 2; dq++) { const r = rowRange.get(q + dq); if (r) { lo = Math.min(lo, r[0]); hi = Math.max(hi, r[1]); } }
+          if (lo <= hi) searchRows.set(q, [lo, hi]);
+        }
+      }
+      const acr = [-a[1] / inRow, a[0] / inRow];   // unit vector across the rows
       const spotAt = (p, q) => {
         const est = [], p0 = Math.round(p);
-        for (let dq = -1; dq <= 1; dq++) for (let dp = -3; dp <= 3; dp++) {
-          const s = placed.get((p0 + dp) + "," + (q + dq));
-          if (!s) continue;
-          const fp = p - (p0 + dp), fq = -dq;
-          est.push([Math.abs(fp) * inRow + Math.abs(fq) * rowSp, s[0] + fp * a[0] + fq * b[0], s[1] + fp * a[1] + fq * b[1]]);
+        // nearest planted trees; further out where the row has few of them
+        for (const [rq, rp] of [[1, 3], [2, 6]]) {
+          for (let dq = -rq; dq <= rq; dq++) for (let dp = -rp; dp <= rp; dp++) {
+            const s = placed.get((p0 + dp) + "," + (q + dq));
+            if (!s) continue;
+            const fp = p - (p0 + dp), fq = -dq;
+            est.push([Math.abs(fp) * inRow + Math.abs(fq) * rowSp, s[0] + fp * a[0] + fq * b[0], s[1] + fp * a[1] + fq * b[1]]);
+          }
+          if (est.length >= 2) break;
+          est.length = 0;
         }
         if (est.length < 2) return null;
         est.sort((e1, e2) => e1[0] - e2[0]);
         const use = est.slice(0, 6);
-        return [percentile(use.map((e) => e[1]), 50), percentile(use.map((e) => e[2]), 50)];
+        let sx = percentile(use.map((e) => e[1]), 50), sy = percentile(use.map((e) => e[2]), 50);
+        // Across the row the position follows the trees of its own row (the
+        // rows beside it may not line up exactly with it).
+        const own = [];
+        for (let dp = 1; dp <= 8 && own.length < 4; dp++) {
+          for (const pp of [p0 - dp, p0 + dp, dp === 1 ? p0 : null]) {
+            if (pp === null) continue;
+            const s = placed.get(pp + "," + q);
+            if (s) own.push(s[0] * acr[0] + s[1] * acr[1]);
+          }
+        }
+        if (own.length) {
+          const shift = percentile(own, 50) - (sx * acr[0] + sy * acr[1]);
+          if (Math.abs(shift) < 0.4 * rowSp) { sx += shift * acr[0]; sy += shift * acr[1]; }
+        }
+        return [sx, sy];
       };
       // Direction in which shadows fall in this image, from the big crowns:
       // the dark ground 2 m from their edges (null when shadows are not clear).
@@ -1902,7 +1937,7 @@
       // Only where the measured grid is the planting design (within 25 %):
       // otherwise the "planting positions" are not where trees were planted.
       const gridOk = !Array.isArray(design) || (Math.abs(inRow / (design[0] * 0.3048) - 1) <= 0.25 && Math.abs(rowSp / (design[1] * 0.3048) - 1) <= 0.4);
-      for (const [q, [lo, hi]] of gridOk ? rowRange : []) {
+      for (const [q, [lo, hi]] of gridOk ? searchRows : []) {
         for (let p = lo - 1; p <= hi + 1; p++) {
           if (occupied.has(p + "," + q)) continue;
           const s = spotAt(p, q);
@@ -1911,6 +1946,7 @@
           check.on++;
           if (r.near) check.onFound++;
           if (r.pick) found.push({ pos: [p, q], pick: r.pick });
+          if (opts.debugYoung) opts.debugYoung("spot", s, s, 0, !!r.pick);
         }
         for (let p = lo - 1; p <= hi; p++) {
           const s = spotAt(p + 0.5, q);
@@ -2138,7 +2174,7 @@
         };
         const found2 = [], picks2 = new Map();
         const check2 = { on: 0, onFound: 0, between: 0, betweenFound: 0 };
-        for (const [q, [lo, hi]] of rowRange) {
+        for (const [q, [lo, hi]] of searchRows) {
           for (let p = lo - 1; p <= hi + 1; p++) {
             if (done.has(p + "," + q)) continue;
             const s = spotAt(p, q);
