@@ -1621,6 +1621,64 @@
         const use = est.slice(0, 6);
         return [percentile(use.map((e) => e[1]), 50), percentile(use.map((e) => e[2]), 50)];
       };
+      // Direction in which shadows fall in this image, from the big crowns:
+      // the dark ground 2 m from their edges (null when shadows are not clear).
+      const shadowDir = (() => {
+        const ys = [];
+        for (let i = 0; i < n; i += 13) if (valid[i] && !labels[i]) ys.push(lumaAt(i));
+        if (ys.length < 100) return null;
+        const groundY = percentile(ys, 50), s2 = 2.0 / pixel;
+        const darkFrac = (ang) => {
+          const dx = Math.cos(ang), dy = -Math.sin(ang);
+          let hit = 0, all = 0;
+          for (let y = 0; y < h; y += 3) for (let x = 0; x < w; x += 3) {
+            const l = labels[y * w + x];
+            if (!l || l > count) continue;
+            const tx = Math.round(x + dx * s2), ty = Math.round(y + dy * s2);
+            if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue;
+            const k = ty * w + tx;
+            all++;
+            if (valid[k] && !labels[k] && lumaAt(k) < 0.6 * groundY) hit++;
+          }
+          return all ? hit / all : 0;
+        };
+        let best = 0, bestAng = 0;
+        for (let deg = 0; deg < 360; deg += 10) { const f = darkFrac((deg * Math.PI) / 180); if (f > best) { best = f; bestAng = deg; } }
+        const opposite = darkFrac(((bestAng + 180) * Math.PI) / 180);
+        if (best < 0.08 || best < 1.5 * opposite) return null;
+        const ang = (bestAng * Math.PI) / 180;
+        return [Math.cos(ang), -Math.sin(ang)];
+      })();
+      // A young tree stands up: right beside it, on the side shadows fall,
+      // lies its own compact shadow (not part of a big tree's shadow).
+      const ownShadow = (inList, mx2, my2, bgYmed) => {
+        if (!shadowDir) return false;
+        const rad = Math.sqrt(inList.size / Math.PI), reach = rad + 1.5 / pixel, box = Math.ceil(4.0 / pixel);
+        const isDark = (k) => valid[k] && !labels[k] && !inList.has(k) && lumaAt(k) < 0.6 * bgYmed;
+        const seeds = [];
+        for (let y = Math.max(0, Math.floor(my2 - reach)); y <= Math.min(h - 1, Math.ceil(my2 + reach)); y++) {
+          for (let x = Math.max(0, Math.floor(mx2 - reach)); x <= Math.min(w - 1, Math.ceil(mx2 + reach)); x++) {
+            const ddx = x - mx2, ddy = y - my2, d = Math.hypot(ddx, ddy);
+            if (d > reach || d < 0.5 * rad) continue;
+            if ((ddx * shadowDir[0] + ddy * shadowDir[1]) / Math.max(d, 1e-6) < Math.cos((40 * Math.PI) / 180)) continue;
+            if (isDark(y * w + x)) seeds.push(y * w + x);
+          }
+        }
+        if (!seeds.length) return false;
+        const seen = new Set(seeds), stack = seeds.slice();
+        let touchesCrown = false;
+        while (stack.length) {
+          const u = stack.pop(), ux = u % w, uy = (u / w) | 0;
+          if (Math.abs(ux - mx2) > box || Math.abs(uy - my2) > box) return false; // runs on: a big shadow
+          for (const v of [ux > 0 ? u - 1 : -1, ux < w - 1 ? u + 1 : -1, u - w, u + w]) {
+            if (v < 0 || v >= n || seen.has(v)) continue;
+            if (labels[v]) { touchesCrown = true; continue; }
+            if (isDark(v)) { seen.add(v); stack.push(v); }
+          }
+        }
+        const A = seen.size * area;
+        return !touchesCrown && A >= Math.max(0.15, 0.3 * inList.size * area) && A <= 12;
+      };
       // the sapling searched within rIn of a spot (null: none, or not
       // searchable); L = the rules
       const findSapling = (sx, sy, L) => {
@@ -1638,10 +1696,17 @@
             if (free(k)) { bg.push(exgAt(k)); bgY.push(lumaAt(k)); }
           }
           if (bg.length < 0.4 * annulus) return null;                     // mostly crowns around
-          if (percentile(bgY, 50) < thresholds.darkY) return null;        // in a big tree's shadow
+          const bgYmed = percentile(bgY, 50);
+          if (bgYmed < thresholds.darkY) return null;                     // in a big tree's shadow
           const bg50 = percentile(bg, 50);
-          const thr = Math.max(percentile(bg, 75) + L.above, L.leafMin * leafGreen);
-          const isLeaf = (k) => free(k) && exgAt(k) >= thr;
+          // leaf pixels: greener than most of the ground (capped, so that
+          // lush grass beside a narrow tree strip does not set the bar)
+          const thr = Math.max(Math.min(percentile(bg, 75) + L.above, bg50 + 0.1), L.leafMin * leafGreen);
+          // (a young crown with its own shadow may also be pale: lighter
+          // than the ground and at least as green)
+          const isLeaf = L.needShadow
+            ? (k) => free(k) && (exgAt(k) >= thr || (lumaAt(k) >= 1.12 * bgYmed && exgAt(k) >= bg50 + 0.02))
+            : (k) => free(k) && exgAt(k) >= thr;
           compOf.fill(0);
           let id2 = 0, pick = null;
           for (let y = rr - R; y <= rr + R; y++) for (let x = cc - R; x <= cc + R; x++) {
@@ -1694,6 +1759,7 @@
             const own25 = percentile(g, 25);
             const asGreen = ring.filter((v) => v >= own25).length / ring.length;
             if (asGreen > L.asGreen) continue;                            // an island of leaves
+            if (L.needShadow && !ownShadow(inList, mx2, my2, bgYmed)) continue; // it stands: its own shadow
             const score = gmax - bg50;
             if (!pick || score > pick.score) pick = { list, score, spot: [(mx2 + 0.5) * pixel, (h - my2 - 0.5) * pixel] };
           }
@@ -1702,6 +1768,14 @@
       // (Looser rules were tried on Barber and on Fine detail: the spots
       // they add turn up nearly as often between positions, i.e. weeds.)
       const L = { above: 0.04, leafMin: 0.5, minArea: 0.25, contrast: 0.14, green: 0.75, round: 0.3, leak: 0.15, asGreen: 0.15 };
+      // second chance: a fainter or paler young crown that casts its own shadow
+      const L2 = { above: 0.03, leafMin: 0.3, minArea: 0.2, contrast: 0.07, green: 0.4, round: 0.3, leak: 0.15, asGreen: 0.15, needShadow: true };
+      const search = (sx, sy) => {
+        const r = findSapling(sx, sy, L);
+        if (!r || r.pick || !shadowDir) return r;
+        const r2 = findSapling(sx, sy, L2);
+        return r2 && r2.pick ? r2 : r;
+      };
       const found = [];
       const check = { on: 0, onFound: 0, between: 0, betweenFound: 0 };
       const betweenPicks = new Map();
@@ -1712,7 +1786,7 @@
         for (let p = lo - 1; p <= hi + 1; p++) {
           if (occupied.has(p + "," + q)) continue;
           const s = spotAt(p, q);
-          const r = s && findSapling(s[0], s[1], L);
+          const r = s && search(s[0], s[1]);
           if (!r) continue;
           check.on++;
           if (r.near) check.onFound++;
@@ -1720,7 +1794,7 @@
         }
         for (let p = lo - 1; p <= hi; p++) {
           const s = spotAt(p + 0.5, q);
-          const r = s && findSapling(s[0], s[1], L);
+          const r = s && search(s[0], s[1]);
           if (!r) continue;
           check.between++;
           if (r.near) betweenPicks.set(p + "," + q, { p, q, pick: r.pick });
@@ -1828,6 +1902,13 @@
     };
     const diagOfLabel = new Int32Array(total + 1);
     for (let t = 0; t < total; t++) if (aliveAll[t]) diagOfLabel[t + 1] = diagonal[t];
+    // How deep (pixels) a point lies inside the canopy of each colour: a
+    // line crossing the other colour keeps to the crown edges.
+    const depthIn = [0, 1].map((f) => {
+      const m2 = new Uint8Array(n);
+      for (let i = 0; i < n; i++) { const l = labels[i]; m2[i] = l > 0 && diagOfLabel[l] !== 0 && Math.abs(diagOfLabel[l]) % 2 === f ? 1 : 0; }
+      return edt(m2, w, h);
+    });
 
     const extent = (t) => {
       const u = U(knots[t]), v = V(knots[t]);
@@ -1927,8 +2008,8 @@
       const dv = 0.25, du = 0.25;
       const n = Math.round((v1 - v0) / dv);
       if (n < 4 || Math.abs(u1 - u0) > 2 * du * n) return null;
-      const uLo = Math.min(u0, u1) - 0.5 * inRow, m = Math.ceil((Math.max(u0, u1) + 0.5 * inRow - uLo) / du) + 1;
-      const fam2 = Math.abs(number) % 2;
+      const uLo = Math.min(u0, u1) - 0.75 * inRow, m = Math.ceil((Math.max(u0, u1) + 0.75 * inRow - uLo) / du) + 1;
+      const fam2 = Math.abs(number) % 2, depthOther = depthIn[1 - fam2];
       const cost = new Float64Array((n + 1) * m).fill(Infinity), back = new Int16Array((n + 1) * m);
       const j0 = Math.round((u0 - uLo) / du), j1 = Math.round((u1 - uLo) / du);
       cost[j0] = 0;
@@ -1938,9 +2019,9 @@
         for (let j = 0; j < m; j++) {
           const u = uLo + j * du;
           const [x, y] = toXY(u, v);
-          const l = labelAt(x, y);
-          const other = l > 0 && diagOfLabel[l] !== 0 && Math.abs(diagOfLabel[l]) % 2 !== fam2;
-          const here = (other ? 10 : 0) + 0.3 * Math.abs(u - uEase);
+          const c = Math.floor(x / pixel), r = h - 1 - Math.floor(y / pixel);
+          const dIn = c < 0 || r < 0 || c >= w || r >= h ? 0 : depthOther[r * w + c] * pixel;  // metres inside the other colour
+          const here = (dIn > 0 ? 10 + 20 * dIn : 0) + 0.3 * Math.abs(u - uEase);
           let best = Infinity, arg = 0;
           for (let k = Math.max(0, j - 2); k <= Math.min(m - 1, j + 2); k++) {
             const c = cost[(i - 1) * m + k] + 0.5 * ((j - k) * du) ** 2;
