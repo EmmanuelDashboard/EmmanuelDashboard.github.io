@@ -18,11 +18,14 @@
  *      becomes a crown (flag YOUNG_TREE) although it is under 2 m² / 1 m;
  *      then every empty position of the 40 x 20 ft grid is searched for a
  *      sapling (an island of leaves on the tree strip), counted only when
- *      the same search finds far fewer spots halfway between positions
- *      (planted saplings, not weeds);
+ *      the measured grid matches the design and the same search finds far
+ *      fewer lone spots halfway between positions (planted saplings, not
+ *      weeds); a run of young trees halfway between positions is a row
+ *      planted half a spacing off and is counted too;
  *   8. EVEN / ODD diagonals as wavy lines through the crowns, one unbroken
  *      line per diagonal (also across white areas), ending in the direction
- *      of the diagonal, never crossing each other; along every row
+ *      of the diagonal, never crossing each other, keeping off canopy of the
+ *      other colour wherever there is a free path; along every row
  *      neighbouring crowns always alternate (1 blue, 2 red ...), also across
  *      a missing tree.
  * Input: RGBA pixels on a square grid of `pixel` metres (north up), and
@@ -1701,7 +1704,11 @@
       const L = { above: 0.04, leafMin: 0.5, minArea: 0.25, contrast: 0.14, green: 0.75, round: 0.3, leak: 0.15, asGreen: 0.15 };
       const found = [];
       const check = { on: 0, onFound: 0, between: 0, betweenFound: 0 };
-      for (const [q, [lo, hi]] of rowRange) {
+      const betweenPicks = new Map();
+      // Only where the measured grid is the planting design (within 25 %):
+      // otherwise the "planting positions" are not where trees were planted.
+      const gridOk = !Array.isArray(design) || (Math.abs(inRow / (design[0] * 0.3048) - 1) <= 0.25 && Math.abs(rowSp / (design[1] * 0.3048) - 1) <= 0.25);
+      for (const [q, [lo, hi]] of gridOk ? rowRange : []) {
         for (let p = lo - 1; p <= hi + 1; p++) {
           if (occupied.has(p + "," + q)) continue;
           const s = spotAt(p, q);
@@ -1711,23 +1718,37 @@
           if (r.near) check.onFound++;
           if (r.pick) found.push({ pos: [p, q], pick: r.pick });
         }
-        for (let p = lo; p < hi; p++) {
+        for (let p = lo - 1; p <= hi; p++) {
           const s = spotAt(p + 0.5, q);
           const r = s && findSapling(s[0], s[1], L);
           if (!r) continue;
           check.between++;
-          if (r.near) check.betweenFound++;
+          if (r.near) betweenPicks.set(p + "," + q, { p, q, pick: r.pick });
         }
       }
+      // Young trees one tree spacing apart halfway between the predicted
+      // positions are a row planted half a spacing off the grid of the old
+      // trees (a run of young trees), not weeds: weeds lie at random.
+      const inRun = (b2) => betweenPicks.has((b2.p - 1) + "," + b2.q) || betweenPicks.has((b2.p + 1) + "," + b2.q);
+      const runs = [...betweenPicks.values()].filter(inRun);
+      check.betweenFound = betweenPicks.size - runs.length;
       const rateOn = check.onFound / Math.max(1, check.on), rateBetween = check.betweenFound / Math.max(1, check.between);
-      gridSearch = { ...check, counted: check.between >= 20 && check.onFound >= 5 && rateBetween <= 0.25 * rateOn, added: 0 };
+      gridSearch = { ...check, gridOk, runs: runs.length, counted: gridOk && check.between >= 20 && check.onFound >= 5 && rateBetween <= 0.25 * rateOn, added: 0 };
       if (gridSearch.counted) {
-        for (const f of found) {
-          if (f.pick.list.some((u) => labels[u])) continue;
+        const taken = new Set(occupied);
+        const commit = (pos2, pick) => {
+          if (pick.list.some((u) => labels[u])) return;
           const id = count + extra.length + 1;
-          for (const u of f.pick.list) { labels[u] = id; mask[u] = 1; }
-          extra.push({ pos: f.pos, spot: f.pick.spot, size: f.pick.list.length, young: true });
+          for (const u of pick.list) { labels[u] = id; mask[u] = 1; }
+          extra.push({ pos: pos2, spot: pick.spot, size: pick.list.length, young: true });
+          taken.add(siteOf(pos2));
           gridSearch.added++;
+        };
+        for (const f of found) commit(f.pos, f.pick);
+        // a run's young tree takes the nearer free planting position
+        for (const b2 of runs.sort((x, y) => x.q - y.q || x.p - y.p)) {
+          const p2 = [b2.p, b2.p + 1].find((pp) => !taken.has(pp + "," + b2.q));
+          if (p2 !== undefined) commit([p2, b2.q], b2.pick);
         }
       }
     }
@@ -1833,7 +1854,7 @@
       return bestU;
     };
 
-    function wavy(members, ext, crossing, separate) {
+    function wavy(number, members, ext, crossing, separate) {
       const groups = [];
       for (const t of members.slice().sort((p, q) => V(knots[p]) - V(knots[q]))) {
         const [lo, hi] = ext.get(t);
@@ -1884,6 +1905,8 @@
       for (let s = 0; s < nb; s++) { const d = lenB * (1 - s / nb); line.push([uk[0] - slope * tail(d, lenB), vk[0] - d]); }
       line.push([uk[0], vk[0]]);
       for (let q = 0; q < vk.length - 1; q++) {
+        const seg = route(number, uk[q], vk[q], uk[q + 1], vk[q + 1]);
+        if (seg) { line.push(...seg); continue; }
         const v0 = vk[q], v1 = vk[q + 1];
         const steps = Math.max(3, Math.ceil((v1 - v0) / 0.25));
         for (let s = 1; s <= steps; s++) {
@@ -1894,6 +1917,53 @@
       const ne = Math.max(3, Math.ceil(lenE / 0.25)), uL = uk[uk.length - 1], vL = vk[vk.length - 1];
       for (let s = 1; s <= ne; s++) { const d = (lenE * s) / ne; line.push([uL + slope * tail(d, lenE), vL + d]); }
       return line;
+    }
+
+    // From one knot of a line to the next: the path that runs least over
+    // canopy of the other colour (dynamic programming over the steps across
+    // the rows, sideways moves cost a little, and it stays near the usual
+    // smooth wave where nothing is in the way). null: too short to route.
+    function route(number, u0, v0, u1, v1) {
+      const dv = 0.25, du = 0.25;
+      const n = Math.round((v1 - v0) / dv);
+      if (n < 4 || Math.abs(u1 - u0) > 2 * du * n) return null;
+      const uLo = Math.min(u0, u1) - 0.5 * inRow, m = Math.ceil((Math.max(u0, u1) + 0.5 * inRow - uLo) / du) + 1;
+      const fam2 = Math.abs(number) % 2;
+      const cost = new Float64Array((n + 1) * m).fill(Infinity), back = new Int16Array((n + 1) * m);
+      const j0 = Math.round((u0 - uLo) / du), j1 = Math.round((u1 - uLo) / du);
+      cost[j0] = 0;
+      for (let i = 1; i <= n; i++) {
+        const v = v0 + ((v1 - v0) * i) / n;
+        const uEase = u0 + (u1 - u0) * ease(i / n);
+        for (let j = 0; j < m; j++) {
+          const u = uLo + j * du;
+          const [x, y] = toXY(u, v);
+          const l = labelAt(x, y);
+          const other = l > 0 && diagOfLabel[l] !== 0 && Math.abs(diagOfLabel[l]) % 2 !== fam2;
+          const here = (other ? 10 : 0) + 0.3 * Math.abs(u - uEase);
+          let best = Infinity, arg = 0;
+          for (let k = Math.max(0, j - 2); k <= Math.min(m - 1, j + 2); k++) {
+            const c = cost[(i - 1) * m + k] + 0.5 * ((j - k) * du) ** 2;
+            if (c < best) { best = c; arg = k; }
+          }
+          cost[i * m + j] = best + here;
+          back[i * m + j] = arg;
+        }
+      }
+      if (!Number.isFinite(cost[n * m + j1])) return null;
+      const us = new Float64Array(n + 1);
+      for (let i = n, j = j1; i >= 0; i--) { us[i] = uLo + j * du; j = back[i * m + j]; }
+      us[0] = u0; us[n] = u1;
+      // light smoothing (ends fixed)
+      const sm = Float64Array.from(us);
+      for (let i = 1; i < n; i++) {
+        let s = 0, c = 0;
+        for (let k = Math.max(0, i - 2); k <= Math.min(n, i + 2); k++) { s += us[k]; c++; }
+        sm[i] = s / c;
+      }
+      const out = [];
+      for (let i = 1; i <= n; i++) out.push([sm[i], v0 + ((v1 - v0) * i) / n]);
+      return out;
     }
 
     const byDiag = new Map();
@@ -1912,7 +1982,7 @@
       let separate = new Set();
       let uv = [];
       for (let attempt = 0; attempt < 2; attempt++) {
-        uv = wavy(members, ext, crossing, separate);
+        uv = wavy(number, members, ext, crossing, separate);
         const hit = new Set();
         for (const [u, v] of uv) { const [x, y] = toXY(u, v); const l = labelAt(x, y); if (l > 0) hit.add(l); }
         separate = new Set(members.filter((t) => !hit.has(t + 1)));
@@ -2000,6 +2070,37 @@
     for (const s of samples.values()) {
       const delta = smooth(s.u.map((u, i) => u - s.u0[i]));
       for (let i = 0; i < s.u.length; i++) s.u[i] = s.u0[i] + delta[i];
+    }
+    untangle(false);
+    // A line keeps off the canopy of the other colour (a red line never
+    // over a blue crown, a blue line never over a red one): where it is on
+    // such a crown it moves sideways (along the row) to the nearest point
+    // that is not, then the bend is smoothed; the order of the lines (no
+    // crossing) is restored last and always wins.
+    const otherAt = (number, u, v) => {
+      const [x, y] = toXY(u, v);
+      const l = labelAt(x, y);
+      return l > 0 && diagOfLabel[l] !== 0 && Math.abs(diagOfLabel[l]) % 2 !== Math.abs(number) % 2;
+    };
+    const push = (number, s, margin) => {
+      let moved = 0;
+      for (let i = 0; i < s.u.length; i++) {
+        const v = (s.k0 + i) * STEP, u = s.u[i];
+        if (!otherAt(number, u, v)) continue;
+        for (let d = pixel / 2; d <= 0.6 * inRow; d += pixel / 2) {
+          const free1 = !otherAt(number, u - d, v), free2 = !otherAt(number, u + d, v);
+          if (free1 || free2) { s.u[i] = free1 ? u - d - margin : u + d + margin; moved++; break; }
+        }
+      }
+      return moved;
+    };
+    for (let round = 0; round < 2; round++) {
+      for (const [number, s] of samples) {
+        const before = Float64Array.from(s.u);
+        if (!push(number, s, pixel)) continue;
+        const delta = smooth(s.u.map((u, i) => u - before[i]));
+        for (let i = 0; i < s.u.length; i++) s.u[i] = before[i] + delta[i];
+      }
     }
     untangle(false);
     let linesMoved = 0;
@@ -2156,8 +2257,8 @@
         young_trees_added: crowns.filter((c) => /YOUNG_TREE/.test(c.flags)).length,
         // planting-position search: spots found on / halfway between positions
         young_grid_search: gridSearch && {
-          positions_searched: gridSearch.on, found_on_positions: gridSearch.onFound,
-          between_searched: gridSearch.between, found_between: gridSearch.betweenFound,
+          grid_matches_design: gridSearch.gridOk, positions_searched: gridSearch.on, found_on_positions: gridSearch.onFound,
+          between_searched: gridSearch.between, found_between: gridSearch.betweenFound, offset_row_trees: gridSearch.runs,
           counted: gridSearch.counted, young_trees_added: gridSearch.added,
         },
         line_points_moved_to_avoid_crossing: linesMoved,
