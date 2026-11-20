@@ -113,7 +113,7 @@ There is no build step.
 ## Method in short
 
 - **Pecan canopy only.** Grass, weeds, soil and shadow are excluded with a colour and texture classifier trained on the image itself. With a DSM, canopy must also stand at least 1 m above the ground, and clear cast shadow (dark, not leaf-green, at ground level) is trimmed from the crown edges.
-- **One crown per planting position.** The planting grid (20 × 40 ft design) is measured from the treetops; a crown is never cut into two pieces.
+- **One crown per planting position.** The planting grid (20 × 40 ft design) is measured from the treetops; where the rows were planted at another distance (for example 50 ft), the distance measured in the image is used. A crown is never cut into two pieces.
 - **Diagonal thinning removes alternate trees in each row and column**, so every crown belongs to exactly one diagonal: EVEN or ODD. Along every row neighbouring crowns always alternate, also across a missing tree (the crowns on one side of the gap move to the next diagonal, chosen so the diagonals stay as smooth as possible).
 - **Canopy areas** are in square metres, in the projected coordinates of the drone image.
 

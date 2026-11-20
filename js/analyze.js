@@ -614,6 +614,41 @@
   const cross = (u, v) => Math.abs(u[0] * v[1] - u[1] * v[0]) / (len(u) * len(v));
   const inv2 = (a, b) => { const det = a[0] * b[1] - b[0] * a[1]; return [[b[1] / det, -b[0] / det], [-a[1] / det, a[0] / det]]; };
 
+  // Distance between rows: treetops projected across the rows; the profile
+  // repeats every row. Returns { P, at(m) }: P = the smallest distance that
+  // repeats clearly (also at twice that distance), at(m) = how strongly a
+  // distance m repeats (0..1). null: too few rows to tell.
+  function rowPeriod(points, across, inRow) {
+    const proj = points.map(([x, y]) => x * across[0] + y * across[1]);
+    const lo = Math.min(...proj), hi = Math.max(...proj), bin = 0.25;
+    const nb = Math.floor((hi - lo) / bin) + 1;
+    if (nb < 40) return null;
+    let hist = new Float32Array(nb);
+    for (const v of proj) hist[Math.floor((v - lo) / bin)]++;
+    hist = gauss(hist, nb, 1, 0.6 / bin);
+    let mean = 0;
+    for (const v of hist) mean += v;
+    mean /= nb;
+    const acRaw = (lag) => { let s = 0; for (let i = 0; i + lag < nb; i++) s += (hist[i] - mean) * (hist[i + lag] - mean); return s / (nb - lag); };
+    const ac0 = acRaw(0);
+    if (!(ac0 > 0)) return null;
+    const maxLag = Math.min(nb - 1, Math.floor(80 / bin));
+    const vals = new Float32Array(maxLag + 1);
+    for (let lag = 0; lag <= maxLag; lag++) vals[lag] = acRaw(lag) / ac0;
+    const at = (m, tol = 0.04) => {
+      let best = -1;
+      for (let l = Math.round((m * (1 - tol)) / bin); l <= Math.round((m * (1 + tol)) / bin); l++) if (l >= 0 && l <= maxLag) best = Math.max(best, vals[l]);
+      return best;
+    };
+    let P = null;
+    for (let l = Math.ceil((1.2 * inRow) / bin); l < Math.min(maxLag, Math.floor(40 / bin)); l++) {
+      if (!(vals[l] >= 0.35 && vals[l] >= vals[l - 1] && vals[l] >= vals[l + 1])) continue;
+      const twice = 2 * l <= maxLag ? at(2 * l * bin, 0.08) : vals[l];
+      if (twice >= 0.35) { P = l * bin; break; }
+    }
+    return { P, at };
+  }
+
   function measureGrid(points, designFt) {
     const nearest = nearestDistances(points);
     const radius = 3.2 * nearest;
@@ -660,6 +695,24 @@
       a = ordered[0];
       b = ordered.slice(1).find((v) => cross(a, v) > Math.sin((20 * Math.PI) / 180)) || null;
       if (!b) throw new Error("Only one planting direction found in the crowns.");
+    }
+    // The real distance between rows, measured on the treetops (the trees
+    // of a row pile up at one place across the rows). Where the design
+    // spacing is not what was planted, the measured one is used.
+    {
+      const ah = [a[0] / len(a), a[1] / len(a)], across = [-ah[1], ah[0]];
+      const rp = rowPeriod(points, across, len(a));
+      const P = rp && rp.P;
+      const perp = (v) => Math.abs(v[0] * across[0] + v[1] * across[1]);
+      if (P && Math.abs(perp(b) / P - 1) > 0.12 && rp.at(perp(b)) < 0.7 * rp.at(P)) {
+        const fits = found.filter((f) => Math.abs(perp(f.v) / P - 1) <= 0.12 && cross(a, f.v) > Math.sin((20 * Math.PI) / 180));
+        if (fits.length) b = fits.reduce((p, q) => (q.s > p.s ? q : p)).v;
+        else {
+          // no tree pair across the rows at that distance: step straight across
+          const sgn = b[0] * across[0] + b[1] * across[1] < 0 ? -1 : 1;
+          b = [sgn * P * across[0], sgn * P * across[1]];
+        }
+      }
     }
     for (let k = 0; k < 20; k++) {
       if (len(b) < len(a)) [a, b] = [b, a];
@@ -1684,6 +1737,8 @@
       };
       // the sapling searched within rIn of a spot (null: none, or not
       // searchable); L = the rules
+      // distance (pixels) from every open pixel to the nearest crown
+      const toCrown = (() => { const open = new Uint8Array(n); for (let i = 0; i < n; i++) open[i] = labels[i] ? 0 : 1; return edt(open, w, h); })();
       const findSapling = (sx, sy, L) => {
           const cc = Math.floor(sx / pixel), rr = h - 1 - Math.floor(sy / pixel);
           if (cc < R || rr < R || cc >= w - R || rr >= h - R) return null;
@@ -1756,9 +1811,17 @@
             if (Math.sqrt(reach2) * pixel > 0.45 * inRow) continue;       // compact, not a strip
             if (list.length / (Math.PI * Math.max(reach2, 1)) < L.round) continue;
             if (touch2 > 0.15 * edge2) continue;                          // not the edge of a big crown
+            let gapC = Infinity, lum = 0;
+            for (const u of list) { if (toCrown[u] < gapC) gapC = toCrown[u]; lum += lumaAt(u); }
+            if (gapC * pixel < 0.4) continue;                             // stands apart from the big crowns
+            lum /= list.length;
+            if (lum < thresholds.darkY || lum < 0.7 * bgYmed) continue;   // sunlit, not leaves in a shadow
             if (leak > L.leak * edge2) continue;                          // not part of a band of grass
             const ring = ringGreens(list, 0.6);
             if (!ring.length) continue;
+            // on mostly bare ground: a greener patch with grass all round is grass
+            const own50 = percentile(g, 50);
+            if (ring.filter((v) => v >= 0.6 * own50).length > 0.5 * ring.length) continue;
             const own25 = percentile(g, 25);
             const asGreen = ring.filter((v) => v >= own25).length / ring.length;
             if (asGreen > L.asGreen) continue;                            // an island of leaves
@@ -1781,10 +1844,10 @@
       };
       const found = [];
       const check = { on: 0, onFound: 0, between: 0, betweenFound: 0 };
-      const betweenPicks = new Map();
+      const betweenPicks = new Map(), searchedBetween = [];
       // Only where the measured grid is the planting design (within 25 %):
       // otherwise the "planting positions" are not where trees were planted.
-      const gridOk = !Array.isArray(design) || (Math.abs(inRow / (design[0] * 0.3048) - 1) <= 0.25 && Math.abs(rowSp / (design[1] * 0.3048) - 1) <= 0.25);
+      const gridOk = !Array.isArray(design) || (Math.abs(inRow / (design[0] * 0.3048) - 1) <= 0.25 && Math.abs(rowSp / (design[1] * 0.3048) - 1) <= 0.4);
       for (const [q, [lo, hi]] of gridOk ? rowRange : []) {
         for (let p = lo - 1; p <= hi + 1; p++) {
           if (occupied.has(p + "," + q)) continue;
@@ -1799,18 +1862,26 @@
           const s = spotAt(p + 0.5, q);
           const r = s && search(s[0], s[1]);
           if (!r) continue;
-          check.between++;
+          searchedBetween.push([p, q]);
           if (r.near) betweenPicks.set(p + "," + q, { p, q, pick: r.pick });
+          if (opts.debugYoung && r.pick) opts.debugYoung("between", s, r.pick.spot, r.pick.list.length * area, r.near);
         }
       }
+      if (opts.debugYoung) for (const f of found) opts.debugYoung("on", spotAt(f.pos[0], f.pos[1]), f.pick.spot, f.pick.list.length * area, Math.hypot(f.pick.spot[0] - spotAt(f.pos[0], f.pos[1])[0], f.pick.spot[1] - spotAt(f.pos[0], f.pos[1])[1]) <= rIn);
       // Young trees one tree spacing apart halfway between the predicted
       // positions are a row planted half a spacing off the grid of the old
       // trees (a run of young trees), not weeds: weeds lie at random.
       const inRun = (b2) => betweenPicks.has((b2.p - 1) + "," + b2.q) || betweenPicks.has((b2.p + 1) + "," + b2.q);
       const runs = [...betweenPicks.values()].filter(inRun);
-      check.betweenFound = betweenPicks.size - runs.length;
+      // Weed evidence only between two positions that both have a tree: next
+      // to an empty position, green there is that position's young tree
+      // planted a little off its spot.
+      const hasTree = (p, q) => occupied.has(p + "," + q);
+      const closed = (p, q) => hasTree(p, q) && hasTree(p + 1, q);
+      check.between = searchedBetween.filter(([p, q]) => closed(p, q)).length;
+      check.betweenFound = [...betweenPicks.values()].filter((b2) => !inRun(b2) && closed(b2.p, b2.q)).length;
       const rateOn = check.onFound / Math.max(1, check.on), rateBetween = check.betweenFound / Math.max(1, check.between);
-      gridSearch = { ...check, gridOk, runs: runs.length, counted: gridOk && check.between >= 20 && check.onFound >= 5 && rateBetween <= 0.25 * rateOn, added: 0 };
+      gridSearch = { ...check, gridOk, runs: runs.length, counted: gridOk && check.between >= 10 && check.onFound >= 3 && rateBetween <= 0.25 * rateOn, added: 0 };
       if (gridSearch.counted) {
         const taken = new Set(occupied);
         const commit = (pos2, pick) => {
@@ -1826,6 +1897,17 @@
         for (const b2 of runs.sort((x, y) => x.q - y.q || x.p - y.p)) {
           const p2 = [b2.p, b2.p + 1].find((pp) => !taken.has(pp + "," + b2.q));
           if (p2 !== undefined) commit([p2, b2.q], b2.pick);
+        }
+        // a young tree planted a little off its spot (sizeable, standing
+        // apart) takes the nearer of the two planting positions beside it
+        // when that one is still empty
+        for (const b2 of betweenPicks.values()) {
+          if (b2.pick.list.length * area < 0.6) continue;
+          const sL = spotAt(b2.p, b2.q), sR = spotAt(b2.p + 1, b2.q);
+          if (!sL || !sR) continue;
+          const dL = Math.hypot(b2.pick.spot[0] - sL[0], b2.pick.spot[1] - sL[1]), dR = Math.hypot(b2.pick.spot[0] - sR[0], b2.pick.spot[1] - sR[1]);
+          const p2 = dL <= dR ? b2.p : b2.p + 1;
+          if (!taken.has(p2 + "," + b2.q)) commit([p2, b2.q], b2.pick);
         }
       }
 
