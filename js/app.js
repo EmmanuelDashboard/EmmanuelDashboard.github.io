@@ -763,9 +763,20 @@
         dsmProblem = `${choice.dsm.name} was not used: ${err.message || err}.`;
       }
     }
+    // Full-resolution windows of the drone image, for the young-tree look at
+    // the empty planting positions (8-bit GeoTIFF, as the Kaggle notebook).
+    let chip = null;
+    if (info.kind === "tiff" && !(info.bits > 8)) {
+      const alpha = alphaIndex(info);
+      const samples = alpha >= 0 ? [0, 1, 2, alpha] : [0, 1, 2];
+      chip = {
+        width: info.width, height: info.height, hasAlpha: alpha >= 0, nodata: info.nodata,
+        read: async (x0, y0, x1, y1) => Array.from(await info.image.readRasters({ samples, window: [x0, y0, x1, y1] })),
+      };
+    }
     let result;
     try {
-      result = await PecanAnalysis.analyze({ rgba, width: W, height: H, pixel, surface }, { designFt: choice.designFt, directionHintDeg: 114 }, (text) => setLoading(text));
+      result = await PecanAnalysis.analyze({ rgba, width: W, height: H, pixel, surface }, { designFt: choice.designFt, directionHintDeg: 114, chip }, (text) => setLoading(text));
     } catch (err) {
       URL.revokeObjectURL(url);
       setLoading(null);

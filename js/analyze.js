@@ -21,7 +21,10 @@
  *      the measured grid matches the design and the same search finds far
  *      fewer lone spots halfway between positions (planted saplings, not
  *      weeds); a run of young trees halfway between positions is a row
- *      planted half a spacing off and is counted too;
+ *      planted half a spacing off and is counted too; then, where the
+ *      original image is given (opts.chip), the positions still empty are
+ *      looked at in full resolution: a young crown of at least 0.3 m² with
+ *      its own dark tree shadow beside it (weeds and grass lie flat);
  *   8. EVEN / ODD diagonals as wavy lines through the crowns, one unbroken
  *      line per diagonal (also across white areas), ending in the direction
  *      of the diagonal, never crossing each other, keeping off canopy of the
@@ -1446,7 +1449,7 @@
     // height rules dropped, standing on an EMPTY planting position of a row,
     // is a young tree. It becomes a crown (flag YOUNG_TREE), so it is counted
     // and takes its place in the EVEN / ODD alternation.
-    let gridSearch = null;
+    let gridSearch = null, fineSearch = null;
     if (small) {
       await step("Young trees on empty planting positions …");
       const I = inv2(a, b);
@@ -1823,6 +1826,228 @@
         for (const b2 of runs.sort((x, y) => x.q - y.q || x.p - y.p)) {
           const p2 = [b2.p, b2.p + 1].find((pp) => !taken.has(pp + "," + b2.q));
           if (p2 !== undefined) commit([p2, b2.q], b2.pick);
+        }
+      }
+
+      // Full-resolution look. A young crown is only a few pixels on the
+      // analysis grid, so at every planting position still empty the
+      // original image (about 5 cm) is read around the spot, and a young
+      // crown is a cluster of leaf pixels standing alone on the ground (not
+      // a band of grass, not shadow, not soil). Checked against the
+      // positions in between like the search above, and added to it.
+      const C = opts.chip;
+      if (C && C.read && gridOk && shadowDir && C.width && C.height) {
+        await step("Young trees: full-resolution look at the empty planting positions …");
+        const sxI = C.width / w, syI = C.height / h;               // image pixels per grid pixel
+        const native = pixel / Math.sqrt(sxI * syI);
+        const kf = Math.max(1, Math.round(0.05 / native)), pf = native * kf;
+        const half = rIn + 2.0;
+        const done = new Set(occupied);
+        for (const e of extra) if (e.pos) done.add(siteOf(e.pos));
+        for (const e of extra) if (e.pos) placed.set(siteOf(e.pos), e.spot);
+        const look = async (sx, sy) => {
+          const gc = sx / pixel, gr = h - sy / pixel;
+          const ci = Math.floor(gc), ri = Math.floor(gr);
+          if (ci < 0 || ri < 0 || ci >= w || ri >= h || !valid[ri * w + ci] || toEdge[ri * w + ci] * pixel < 2.0) return null;
+          const halfI = half / native;
+          let x0 = Math.max(0, Math.floor(gc * sxI - halfI)), y0 = Math.max(0, Math.floor(gr * syI - halfI));
+          let x1 = Math.min(C.width, Math.ceil(gc * sxI + halfI)), y1 = Math.min(C.height, Math.ceil(gr * syI + halfI));
+          const fw = Math.floor((x1 - x0) / kf), fh = Math.floor((y1 - y0) / kf);
+          if (fw < 8 || fh < 8) return null;
+          x1 = x0 + fw * kf; y1 = y0 + fh * kf;
+          const bands = await C.read(x0, y0, x1, y1);
+          const fg = createGrid(x1 - x0, y1 - y0, fw, fh, { hasAlpha: !!C.hasAlpha, nodata: C.nodata, bits: 8 });
+          fg.addRows(0, y1 - y0, bands);
+          const F = fg.finish();
+          const nf = fw * fh;
+          const gIdx = new Int32Array(nf), mx = new Float64Array(nf), my = new Float64Array(nf);
+          const free2 = new Uint8Array(nf), ex = new Float32Array(nf), lu = new Float32Array(nf);
+          for (let fy = 0; fy < fh; fy++) for (let fx = 0; fx < fw; fx++) {
+            const k = fy * fw + fx, ix = x0 + (fx + 0.5) * kf, iy = y0 + (fy + 0.5) * kf;
+            const gx = Math.min(w - 1, Math.floor(ix / sxI)), gy = Math.min(h - 1, Math.floor(iy / syI)), g = gy * w + gx;
+            gIdx[k] = g; mx[k] = (ix / sxI) * pixel; my[k] = (h - iy / syI) * pixel;
+            const R = F[4 * k], G = F[4 * k + 1], B = F[4 * k + 2];
+            ex[k] = (2 * G - R - B) / (R + G + B + 1); lu[k] = 0.299 * R + 0.587 * G + 0.114 * B;
+            free2[k] = F[4 * k + 3] && valid[g] && !labels[g] && !trimmedAway[g] ? 1 : 0;
+          }
+          // leaf greenness smoothed over 3 x 3 pixels (single grass blades fade)
+          const exS = new Float32Array(nf);
+          for (let fy = 0; fy < fh; fy++) for (let fx = 0; fx < fw; fx++) {
+            let s = 0, c = 0;
+            for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+              const xx = fx + dx, yy = fy + dy;
+              if (xx < 0 || yy < 0 || xx >= fw || yy >= fh) continue;
+              s += ex[yy * fw + xx]; c++;
+            }
+            exS[fy * fw + fx] = s / c;
+          }
+          const dist = (k) => Math.hypot(mx[k] - sx, my[k] - sy);
+          const bg = [], bgY = [];
+          let ann = 0;
+          for (let k = 0; k < nf; k++) {
+            const d = dist(k);
+            if (d <= rIn || d > rIn + 1.0) continue;
+            ann++;
+            if (free2[k]) { bg.push(exS[k]); bgY.push(lu[k]); }
+          }
+          if (bg.length < 0.4 * ann) return null;
+          const bgYmed = percentile(bgY, 50);
+          if (bgYmed < thresholds.darkY) return null;
+          const bg50 = percentile(bg, 50);
+          const thr = Math.max(Math.min(percentile(bg, 75) + 0.05, bg50 + 0.12), 0.5 * leafGreen);
+          const leaf = (k) => free2[k] && exS[k] >= thr;
+          const comp = new Int32Array(nf);
+          let idc = 0, pick = null;
+          const ringR = Math.max(1, Math.round(0.4 / pf));
+          for (let k0 = 0; k0 < nf; k0++) {
+            if (comp[k0] || !leaf(k0) || dist(k0) > rIn) continue;
+            comp[k0] = ++idc;
+            const list = [], stack = [k0];
+            let leak = 0;
+            while (stack.length) {
+              const u = stack.pop(), ux = u % fw, uy = (u / fw) | 0;
+              list.push(u);
+              for (const [vx, vy] of [[ux - 1, uy], [ux + 1, uy], [ux, uy - 1], [ux, uy + 1]]) {
+                if (vx < 0 || vy < 0 || vx >= fw || vy >= fh) { leak++; continue; }
+                const v = vy * fw + vx;
+                if (comp[v] || !leaf(v)) continue;
+                if (dist(v) > rIn + 0.6) { leak++; continue; }
+                comp[v] = idc;
+                stack.push(v);
+              }
+            }
+            const A = list.length * pf * pf;
+            if (A < 0.3 || A > maxArea) continue;                               // young-crown sized (smaller: like a weed)
+            const g = list.map((u) => exS[u]);
+            const gmax = Math.max(...g);
+            if (gmax - bg50 < 0.12) continue;                                   // much greener than the ground
+            if (percentile(list.map((u) => ex[u]), 75) < 0.6 * leafGreen) continue; // leaf green
+            let cx = 0, cy = 0;
+            for (const u of list) { cx += u % fw; cy += (u / fw) | 0; }
+            cx /= list.length; cy /= list.length;
+            let reach2 = 0, edge = 0, touch = 0;
+            const inL = new Set(list);
+            let bx0 = fw, by0 = fh, bx1 = 0, by1 = 0;
+            for (const u of list) {
+              const ux = u % fw, uy = (u / fw) | 0;
+              reach2 = Math.max(reach2, (ux - cx) ** 2 + (uy - cy) ** 2);
+              if (ux < bx0) bx0 = ux; if (ux > bx1) bx1 = ux; if (uy < by0) by0 = uy; if (uy > by1) by1 = uy;
+              for (const [vx, vy] of [[ux - 1, uy], [ux + 1, uy], [ux, uy - 1], [ux, uy + 1]]) {
+                if (vx < 0 || vy < 0 || vx >= fw || vy >= fh) continue;
+                const v = vy * fw + vx;
+                if (inL.has(v)) continue;
+                edge++;
+                if (labels[gIdx[v]]) touch++;
+              }
+            }
+            if (Math.sqrt(reach2) * pf > 0.45 * inRow) continue;               // compact, not a strip
+            if (list.length / (Math.PI * Math.max(reach2, 1)) < 0.2) continue;
+            if (touch > 0.15 * edge || leak > 0.15 * edge) continue;            // not a crown edge, not a band of grass
+            // an island of leaves: little leaf-green ground within 0.4 m
+            let ring = 0, ringGreen = 0;
+            for (let yy = Math.max(0, by0 - ringR); yy <= Math.min(fh - 1, by1 + ringR); yy++) {
+              for (let xx = Math.max(0, bx0 - ringR); xx <= Math.min(fw - 1, bx1 + ringR); xx++) {
+                const v = yy * fw + xx;
+                if (inL.has(v) || !free2[v]) continue;
+                let near2 = false;
+                for (const u of list) { const ux = u % fw, uy = (u / fw) | 0; if ((ux - xx) ** 2 + (uy - yy) ** 2 <= ringR * ringR) { near2 = true; break; } }
+                if (!near2) continue;
+                ring++;
+                if (exS[v] >= thr) ringGreen++;
+              }
+            }
+            if (!ring || ringGreen > 0.2 * ring) continue;
+            // It stands up: its own compact shadow lies right beside it, on
+            // the side the big trees' shadows fall (weeds and grass lie flat).
+            {
+              const sdx = shadowDir[0], sdy = shadowDir[1];
+              const rad = Math.sqrt(list.length / Math.PI), reachS = rad + 1.2 / pf;
+              const isDark = (v) => free2[v] && !inL.has(v) && lu[v] < 0.55 * bgYmed;
+              const seeds = [];
+              for (let yy = Math.max(0, Math.floor(cy - reachS)); yy <= Math.min(fh - 1, Math.ceil(cy + reachS)); yy++) {
+                for (let xx = Math.max(0, Math.floor(cx - reachS)); xx <= Math.min(fw - 1, Math.ceil(cx + reachS)); xx++) {
+                  const ddx = xx - cx, ddy = yy - cy, d = Math.hypot(ddx, ddy);
+                  if (d > reachS || d < 0.3 * rad) continue;
+                  if ((ddx * sdx + ddy * sdy) / Math.max(d, 1e-6) < 0.7) continue;
+                  const v = yy * fw + xx;
+                  if (isDark(v)) seeds.push(v);
+                }
+              }
+              if (!seeds.length) continue;
+              const seen = new Set(seeds), st = seeds.slice();
+              let bad = false;
+              while (st.length && !bad) {
+                const u = st.pop(), ux = u % fw, uy = (u / fw) | 0;
+                for (const [vx, vy] of [[ux - 1, uy], [ux + 1, uy], [ux, uy - 1], [ux, uy + 1]]) {
+                  if (vx < 0 || vy < 0 || vx >= fw || vy >= fh) { bad = true; break; }  // runs on: a big shadow
+                  const v = vy * fw + vx;
+                  if (seen.has(v) || inL.has(v)) continue;
+                  if (labels[gIdx[v]]) { bad = true; break; }                          // a big tree's shadow
+                  if (isDark(v)) { seen.add(v); st.push(v); }
+                }
+              }
+              // a real tree shadow: dark, about the size of the crown (0.5 to
+              // 2.5 times), and right next to it (measured on young pecans)
+              const As = seen.size * pf * pf;
+              if (bad || As < 0.5 * A || As > 2.5 * A || As > 12) continue;
+              if (percentile([...seen].map((v) => lu[v]), 50) > 0.45 * bgYmed) continue;
+              const along = [...seen].reduce((s, v) => s + ((v % fw) - cx) * sdx + (((v / fw) | 0) - cy) * sdy, 0) / seen.size / Math.max(rad, 1);
+              if (along > 4) continue;
+            }
+            const spot = [list.reduce((s, u) => s + mx[u], 0) / list.length, list.reduce((s, u) => s + my[u], 0) / list.length];
+            const score = A * (gmax - bg50);
+            if (!pick || score > pick.score) pick = { score, spot, cells: list.map((u) => gIdx[u]), A };
+          }
+          return { pick, near: !!pick && Math.hypot(pick.spot[0] - sx, pick.spot[1] - sy) <= rIn };
+        };
+        const found2 = [], picks2 = new Map();
+        const check2 = { on: 0, onFound: 0, between: 0, betweenFound: 0 };
+        for (const [q, [lo, hi]] of rowRange) {
+          for (let p = lo - 1; p <= hi + 1; p++) {
+            if (done.has(p + "," + q)) continue;
+            const s = spotAt(p, q);
+            const r = s && await look(s[0], s[1]);
+            if (!r) continue;
+            check2.on++;
+            if (r.near) check2.onFound++;
+            if (r.pick) found2.push({ pos: [p, q], pick: r.pick });
+          }
+          for (let p = lo - 1; p <= hi; p++) {
+            if (betweenPicks.has(p + "," + q)) continue;     // green already found there by the search above
+            const s = spotAt(p + 0.5, q);
+            const r = s && await look(s[0], s[1]);
+            if (!r) continue;
+            check2.between++;
+            if (r.near) picks2.set(p + "," + q, { p, q, pick: r.pick });
+          }
+        }
+        const inRun2 = (b2) => picks2.has((b2.p - 1) + "," + b2.q) || picks2.has((b2.p + 1) + "," + b2.q);
+        const runs2 = [...picks2.values()].filter(inRun2);
+        check2.betweenFound = picks2.size - runs2.length;
+        const rate2On = check2.onFound / Math.max(1, check2.on), rate2Between = check2.betweenFound / Math.max(1, check2.between);
+        fineSearch = { ...check2, runs: runs2.length, counted: check2.between >= 20 && check2.onFound >= 3 && rate2Between <= 0.25 * rate2On, added: 0 };
+        if (fineSearch.counted) {
+          const commit2 = (pos2, pick) => {
+            if (done.has(siteOf(pos2))) return;
+            const cover = new Map();
+            for (const g of pick.cells) cover.set(g, (cover.get(g) || 0) + 1);
+            const cells = [...cover.entries()].filter(([g, c]) => !labels[g] && c * pf * pf >= 0.3 * area).map(([g]) => g);
+            if (!cells.length) {
+              const gc = Math.floor(pick.spot[0] / pixel), gr = h - 1 - Math.floor(pick.spot[1] / pixel), g = gr * w + gc;
+              if (gc < 0 || gr < 0 || gc >= w || gr >= h || labels[g]) return;
+              cells.push(g);
+            }
+            const id = count + extra.length + 1;
+            for (const g of cells) { labels[g] = id; mask[g] = 1; }
+            extra.push({ pos: pos2, spot: pick.spot, size: cells.length, young: true });
+            done.add(siteOf(pos2));
+            fineSearch.added++;
+          };
+          for (const f of found2) commit2(f.pos, f.pick);
+          for (const b2 of runs2.sort((x, y) => x.q - y.q || x.p - y.p)) {
+            const p2 = [b2.p, b2.p + 1].find((pp) => !done.has(pp + "," + b2.q));
+            if (p2 !== undefined) commit2([p2, b2.q], b2.pick);
+          }
         }
       }
     }
@@ -2341,6 +2566,11 @@
           grid_matches_design: gridSearch.gridOk, positions_searched: gridSearch.on, found_on_positions: gridSearch.onFound,
           between_searched: gridSearch.between, found_between: gridSearch.betweenFound, offset_row_trees: gridSearch.runs,
           counted: gridSearch.counted, young_trees_added: gridSearch.added,
+        },
+        young_full_resolution: fineSearch && {
+          positions_searched: fineSearch.on, found_on_positions: fineSearch.onFound,
+          between_searched: fineSearch.between, found_between: fineSearch.betweenFound, offset_row_trees: fineSearch.runs,
+          counted: fineSearch.counted, young_trees_added: fineSearch.added,
         },
         line_points_moved_to_avoid_crossing: linesMoved,
         row_neighbours: rowPairs,
