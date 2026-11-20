@@ -1782,7 +1782,7 @@
         let best = 0, bestAng = 0;
         for (let deg = 0; deg < 360; deg += 10) { const f = darkFrac((deg * Math.PI) / 180); if (f > best) { best = f; bestAng = deg; } }
         const opposite = darkFrac(((bestAng + 180) * Math.PI) / 180);
-        if (best < 0.08 || best < 1.5 * opposite) return null;
+        if (best < 0.05 || best < 1.8 * opposite) return null;
         const ang = (bestAng * Math.PI) / 180;
         return [Math.cos(ang), -Math.sin(ang)];
       })();
@@ -2089,7 +2089,7 @@
               }
             }
             const A = list.length * pf * pf;
-            if (A < 0.3 || A > maxArea) continue;                               // young-crown sized (smaller: like a weed)
+            if (A < (opts.fineMinArea || 0.3) || A > maxArea) continue;         // young-crown sized (smaller: like a weed)
             const g = list.map((u) => exS[u]);
             const gmax = Math.max(...g);
             if (gmax - bg50 < 0.12) continue;                                   // much greener than the ground
