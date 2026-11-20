@@ -24,8 +24,7 @@
  *      line per diagonal (also across white areas), ending in the direction
  *      of the diagonal, never crossing each other; along every row
  *      neighbouring crowns always alternate (1 blue, 2 red ...), also across
- *      a missing tree;
- *   9. empty planting positions (missing trees) from the 40 x 20 ft grid.
+ *      a missing tree.
  * Input: RGBA pixels on a square grid of `pixel` metres (north up), and
  * optionally `surface`: DSM elevation on the same grid (NaN = no data).
  */
@@ -1619,8 +1618,9 @@
         const use = est.slice(0, 6);
         return [percentile(use.map((e) => e[1]), 50), percentile(use.map((e) => e[2]), 50)];
       };
-      // the sapling searched within rIn of a spot (null: none, or not searchable)
-      const findSapling = (sx, sy) => {
+      // the sapling searched within rIn of a spot (null: none, or not
+      // searchable); L = the rules
+      const findSapling = (sx, sy, L) => {
           const cc = Math.floor(sx / pixel), rr = h - 1 - Math.floor(sy / pixel);
           if (cc < R || rr < R || cc >= w - R || rr >= h - R) return null;
           if (!valid[rr * w + cc] || toEdge[rr * w + cc] * pixel < 2.0) return null;
@@ -1637,7 +1637,7 @@
           if (bg.length < 0.4 * annulus) return null;                     // mostly crowns around
           if (percentile(bgY, 50) < thresholds.darkY) return null;        // in a big tree's shadow
           const bg50 = percentile(bg, 50);
-          const thr = Math.max(percentile(bg, 75) + 0.04, 0.5 * leafGreen);
+          const thr = Math.max(percentile(bg, 75) + L.above, L.leafMin * leafGreen);
           const isLeaf = (k) => free(k) && exgAt(k) >= thr;
           compOf.fill(0);
           let id2 = 0, pick = null;
@@ -1663,11 +1663,11 @@
               }
             }
             const A = list.length * area;
-            if (A < 0.25 || A > maxArea) continue;                         // sapling-sized
+            if (A < Math.max(L.minArea, 2 * area) || A > maxArea) continue; // sapling-sized
             const g = list.map(exgAt);
             const gmax = Math.max(...g);
-            if (gmax - bg50 < 0.14) continue;                            // much greener than the ground
-            if (percentile(g, 75) < 0.75 * leafGreen) continue;           // as green as pecan leaves
+            if (gmax - bg50 < L.contrast) continue;                        // much greener than the ground
+            if (percentile(g, 75) < L.green * leafGreen) continue;         // as green as pecan leaves
             let mx2 = 0, my2 = 0;
             for (const u of list) { mx2 += u % w; my2 += (u / w) | 0; }
             mx2 /= list.length; my2 /= list.length;
@@ -1683,26 +1683,29 @@
               }
             }
             if (Math.sqrt(reach2) * pixel > 0.45 * inRow) continue;       // compact, not a strip
-            if (list.length / (Math.PI * Math.max(reach2, 1)) < 0.3) continue;
+            if (list.length / (Math.PI * Math.max(reach2, 1)) < L.round) continue;
             if (touch2 > 0.15 * edge2) continue;                          // not the edge of a big crown
-            if (leak > 0.15 * edge2) continue;                            // not part of a band of grass
+            if (leak > L.leak * edge2) continue;                          // not part of a band of grass
             const ring = ringGreens(list, 0.6);
             if (!ring.length) continue;
             const own25 = percentile(g, 25);
             const asGreen = ring.filter((v) => v >= own25).length / ring.length;
-            if (asGreen > 0.15) continue;                                 // an island of leaves
+            if (asGreen > L.asGreen) continue;                            // an island of leaves
             const score = gmax - bg50;
             if (!pick || score > pick.score) pick = { list, score, spot: [(mx2 + 0.5) * pixel, (h - my2 - 0.5) * pixel] };
           }
           return { pick, near: !!pick && Math.hypot(pick.spot[0] - sx, pick.spot[1] - sy) <= rIn };
       };
+      // (Looser rules were tried on Barber and on Fine detail: the spots
+      // they add turn up nearly as often between positions, i.e. weeds.)
+      const L = { above: 0.04, leafMin: 0.5, minArea: 0.25, contrast: 0.14, green: 0.75, round: 0.3, leak: 0.15, asGreen: 0.15 };
       const found = [];
       const check = { on: 0, onFound: 0, between: 0, betweenFound: 0 };
       for (const [q, [lo, hi]] of rowRange) {
         for (let p = lo - 1; p <= hi + 1; p++) {
           if (occupied.has(p + "," + q)) continue;
           const s = spotAt(p, q);
-          const r = s && findSapling(s[0], s[1]);
+          const r = s && findSapling(s[0], s[1], L);
           if (!r) continue;
           check.on++;
           if (r.near) check.onFound++;
@@ -1710,20 +1713,21 @@
         }
         for (let p = lo; p < hi; p++) {
           const s = spotAt(p + 0.5, q);
-          const r = s && findSapling(s[0], s[1]);
+          const r = s && findSapling(s[0], s[1], L);
           if (!r) continue;
           check.between++;
           if (r.near) check.betweenFound++;
         }
       }
       const rateOn = check.onFound / Math.max(1, check.on), rateBetween = check.betweenFound / Math.max(1, check.between);
-      gridSearch = { ...check, counted: check.between >= 20 && check.onFound >= 5 && rateBetween <= 0.25 * rateOn };
+      gridSearch = { ...check, counted: check.between >= 20 && check.onFound >= 5 && rateBetween <= 0.25 * rateOn, added: 0 };
       if (gridSearch.counted) {
         for (const f of found) {
           if (f.pick.list.some((u) => labels[u])) continue;
           const id = count + extra.length + 1;
           for (const u of f.pick.list) { labels[u] = id; mask[u] = 1; }
           extra.push({ pos: f.pos, spot: f.pick.spot, size: f.pick.list.length, young: true });
+          gridSearch.added++;
         }
       }
     }
@@ -1750,55 +1754,6 @@
     // Crowns below 2 m² are not shown, so they take no part in the colours
     // (young trees on their planting position excepted).
     for (let t = 0; t < total; t++) if (area2[t + 1] * area < 2.0 && !young[t]) aliveAll[t] = 0;
-
-    // Empty planting positions (missing trees): inside a planted row, in a
-    // gap of at most 4 trees (a longer gap is unplanted ground), where the
-    // 40 × 20 ft grid says a tree stands (from its planted neighbours) but
-    // no crown or young tree was found and the ground is open (no crown
-    // within 0.6 m), at least half a tree spacing inside the field. Marked
-    // on the map, never counted as canopy.
-    const emptySites = [];
-    {
-      const have = new Map(), span = new Map();
-      for (let t = 0; t < total; t++) {
-        if (!pos[t] || !aliveAll[t]) continue;
-        have.set(siteOf(pos[t]), pts[t]);
-        const [i, j] = pos[t], r = span.get(j);
-        span.set(j, r ? [Math.min(r[0], i), Math.max(r[1], i)] : [i, i]);
-      }
-      const rowSp = len(b), rr = Math.max(1, Math.round(0.6 / pixel));
-      const edgeDist = edt(valid, w, h);
-      for (const [q, [lo, hi]] of span) {
-        for (let p = lo + 1; p < hi; p++) {
-          if (have.has(p + "," + q)) continue;
-          let gapLo = p, gapHi = p;
-          while (!have.has((gapLo - 1) + "," + q)) gapLo--;
-          while (!have.has((gapHi + 1) + "," + q)) gapHi++;
-          if (gapHi - gapLo + 1 > 4) { p = gapHi; continue; }
-          const est = [];
-          for (let dq = -1; dq <= 1; dq++) for (let dp = -3; dp <= 3; dp++) {
-            const s = have.get((p + dp) + "," + (q + dq));
-            if (s) est.push([Math.abs(dp) * inRow + Math.abs(dq) * rowSp, s[0] - dp * a[0] - dq * b[0], s[1] - dp * a[1] - dq * b[1]]);
-          }
-          if (est.length < 2) continue;
-          est.sort((e1, e2) => e1[0] - e2[0]);
-          const use = est.slice(0, 6);
-          const spot = [percentile(use.map((e) => e[1]), 50), percentile(use.map((e) => e[2]), 50)];
-          const c = Math.floor(spot[0] / pixel), r = h - 1 - Math.floor(spot[1] / pixel);
-          if (c < 0 || r < 0 || c >= w || r >= h || !valid[r * w + c]) continue;
-          if (edgeDist[r * w + c] * pixel < 0.5 * inRow) continue;
-          let open = true;
-          for (let dy = -rr; dy <= rr && open; dy++) for (let dx = -rr; dx <= rr && open; dx++) {
-            if (dx * dx + dy * dy > rr * rr) continue;
-            const x = c + dx, y = r + dy;
-            if (x < 0 || y < 0 || x >= w || y >= h) continue;
-            const l = labels[y * w + x];
-            if (l && aliveAll[l - 1]) open = false;
-          }
-          if (open) emptySites.push({ spot, pos: [p, q] });
-        }
-      }
-    }
 
     // ---------------- diagonals
     await step("Drawing the EVEN / ODD diagonals …");
@@ -2186,7 +2141,6 @@
     return {
       crowns,
       diagonals: [...lines.entries()].map(([number, pieces3]) => ({ number, pieces: pieces3 })),
-      empty_positions: emptySites.map((e) => ({ x: e.spot[0], y: e.spot[1], grid_row: e.pos[1] - minJ + 1, grid_tree: e.pos[0] - minI + 1 })),
       settings: {
         in_row_spacing_m: inRow,
         row_spacing_m: rowSpacing,
@@ -2203,9 +2157,9 @@
         // planting-position search: spots found on / halfway between positions
         young_grid_search: gridSearch && {
           positions_searched: gridSearch.on, found_on_positions: gridSearch.onFound,
-          between_searched: gridSearch.between, found_between: gridSearch.betweenFound, counted: gridSearch.counted,
+          between_searched: gridSearch.between, found_between: gridSearch.betweenFound,
+          counted: gridSearch.counted, young_trees_added: gridSearch.added,
         },
-        empty_planting_positions: emptySites.length,
         line_points_moved_to_avoid_crossing: linesMoved,
         row_neighbours: rowPairs,
         row_neighbours_same_colour: rowSame,
