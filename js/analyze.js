@@ -1545,7 +1545,7 @@
     // height rules dropped, standing on an EMPTY planting position of a row,
     // is a young tree. It becomes a crown (flag YOUNG_TREE), so it is counted
     // and takes its place in the EVEN / ODD alternation.
-    let gridSearch = null, fineSearch = null;
+    let gridSearch = null, fineSearch = null, rowWalk = null;
     if (small) {
       await step("Young trees on empty planting positions …");
       const I = inv2(a, b);
@@ -2222,6 +2222,85 @@
           }
         }
       }
+
+      // Row walk: along every row of trees (its own line, on to the end of
+      // its tree strip) young trees are looked for between and beyond the
+      // trees, also where the trees stand at another spacing than the grid
+      // (a block planted differently). Only on images where the search above
+      // was trusted (strips free of weeds), only young crowns of at least
+      // 0.3 m², and each at least about a tree spacing from every tree of
+      // its row (so never a weed beside a tree).
+      if (gridSearch && gridSearch.counted) {
+        await step("Young trees: walking along every row …");
+        const ah = [a[0] / inRow, a[1] / inRow];
+        const Uf = (p2) => p2[0] * ah[0] + p2[1] * ah[1], Vf = (p2) => p2[0] * acr[0] + p2[1] * acr[1];
+        const rows2 = new Map(), occ = new Set();
+        const addPt = (q, pt, ps) => { if (!rows2.has(q)) rows2.set(q, []); rows2.get(q).push({ u: Uf(pt), v: Vf(pt), pos: ps, pt }); };
+        for (let t = 0; t < count; t++) if (pos[t] && alive[t]) { addPt(pos[t][1], pts[t], pos[t]); occ.add(siteOf(pos[t])); }
+        for (const e of extra) if (e.pos) { addPt(e.pos[1], e.spot, e.pos); occ.add(siteOf(e.pos)); }
+        const minGap = 0.55 * inRow;
+        rowWalk = { rows: 0, onRows: 0, inAlleys: 0, counted: false, added: 0 };
+        const cands = [];
+        // walk one line (the row, or the alley beside it: lineShift = 0 or
+        // half a row spacing); young crowns found, at least minGap apart
+        const walk = (list, lineShift, keep) => {
+          const nearOwn = (u, k) => list.map((o) => [Math.abs(o.u - u), o]).sort((x, y) => x[0] - y[0]).slice(0, k).map((x) => x[1]);
+          const vAt = (u) => percentile(nearOwn(u, 3).map((o) => o.v), 50) + lineShift;
+          const picks = [];
+          // three lanes along the line (a big tree's top may sit off the strip centre)
+          for (let u = list[0].u - 3 * inRow; u <= list[list.length - 1].u + 3 * inRow; u += rIn) for (const lane of [0, -0.8, 0.8]) {
+            const v = vAt(u) + lane * rIn;
+            const r = findSapling(u * ah[0] + v * acr[0], u * ah[1] + v * acr[1], L);
+            if (!r || !r.pick || r.pick.list.length * area < 0.45) continue;
+            const pk = r.pick, pu = Uf(pk.spot);
+            if (Math.abs(Vf(pk.spot) - vAt(pu)) > 1.6 * rIn) continue;                    // on the line
+            let clear = Infinity;
+            for (const u2 of pk.list) if (toCrown[u2] < clear) clear = toCrown[u2];
+            if (clear * pixel < 1.0) continue;                                             // standing clear of big crowns
+            if (picks.some((o) => Math.hypot(o.spot[0] - pk.spot[0], o.spot[1] - pk.spot[1]) < 0.5)) continue;
+            picks.push(pk);
+          }
+          picks.sort((x, y) => y.list.length - x.list.length);
+          const taken = lineShift ? [] : list.map((o) => o.u), out = [];
+          for (const pk of picks) {
+            const pu = Uf(pk.spot);
+            if (taken.some((tu) => Math.abs(tu - pu) < minGap)) continue;
+            taken.push(pu);
+            out.push(pk);
+          }
+          if (keep) for (const pk of out) keep.push({ pk, list, nearOwn });
+          return out.length;
+        };
+        for (const list of rows2.values()) {
+          if (list.length < 2) continue;
+          rowWalk.rows++;
+          list.sort((p1, p2) => p1.u - p2.u);
+          rowWalk.onRows += walk(list, 0, cands);
+          // the alley beside the row, where nothing was planted: the check
+          rowWalk.inAlleys += walk(list, 0.5 * rowSp, null);
+        }
+        rowWalk.counted = rowWalk.onRows >= 3 && rowWalk.inAlleys <= 0.15 * rowWalk.onRows;
+        for (const { pk, nearOwn } of rowWalk.counted ? cands : []) {
+          const pu = Uf(pk.spot);
+          {
+            if (pk.list.some((u2) => labels[u2])) continue;
+            // its planting position when that is free and close, else off the grid
+            let ps = null;
+            const o = nearOwn(pu, 1)[0];
+            if (o && o.pos) {
+              const ex = pk.spot[0] - o.pt[0], ey = pk.spot[1] - o.pt[1];
+              const uu = o.pos[0] + I[0][0] * ex + I[0][1] * ey, vv = o.pos[1] + I[1][0] * ex + I[1][1] * ey;
+              const pp = Math.round(uu), qq = Math.round(vv);
+              if (Math.abs(uu - pp) <= 0.35 && Math.abs(vv - qq) <= 0.3 && !occ.has(pp + "," + qq)) ps = [pp, qq];
+            }
+            if (ps) occ.add(siteOf(ps));
+            const id = count + extra.length + 1;
+            for (const u2 of pk.list) { labels[u2] = id; mask[u2] = 1; }
+            extra.push({ pos: ps, spot: pk.spot, size: pk.list.length, young: true });
+            rowWalk.added++;
+          }
+        }
+      }
     }
     const total = count + extra.length;
     extra.forEach((e, k) => {
@@ -2592,9 +2671,71 @@
       }
     }
     untangle(false);
-    // last: gentle smoothing of every line (no kinks), order kept
+    // gentle smoothing of every line (no kinks), order kept
     for (let round = 0; round < 2; round++) {
       for (const s of samples.values()) s.u = smooth(s.u);
+      untangle(false);
+    }
+    // Last word: off the canopy of the other colour. A point on such a crown
+    // moves sideways to just past its edge (the nearer side), the move is
+    // spread smoothly over 1.5 m on each side, and where lines must give way
+    // to each other (no crossing), the moved points hold their place.
+    for (const s of samples.values()) s.w = new Float64Array(s.u.length).fill(1);
+    for (let round = 0; round < 4; round++) {
+      let anyMoved = false;
+      for (const [number, s] of samples) {
+        const shift = new Float64Array(s.u.length);
+        for (let i = 0; i < s.u.length; i++) {
+          const v = (s.k0 + i) * STEP, u = s.u[i];
+          if (!otherAt(number, u, v)) continue;
+          // (no free path within 2 m: closed canopy, the line stays)
+          for (let d = pixel / 2; d <= Math.min(2.0, 0.35 * inRow); d += pixel / 2) {
+            const freeL = !otherAt(number, u - d, v), freeR = !otherAt(number, u + d, v);
+            if (!freeL && !freeR) continue;
+            const sgn = freeL ? -1 : 1;
+            const extra2 = !otherAt(number, u + sgn * (d + 0.3), v) ? 0.3 : 0;
+            shift[i] = sgn * (d + extra2);
+            break;
+          }
+        }
+        let moved = false;
+        const total2 = new Float64Array(s.u.length);
+        for (let i = 0; i < s.u.length; i++) {
+          if (!shift[i]) continue;
+          moved = true;
+          const spreadK = Math.round(Math.max(1.5, 2 * Math.abs(shift[i])) / STEP);   // gradual bends
+          for (let j = Math.max(0, i - spreadK); j <= Math.min(s.u.length - 1, i + spreadK); j++) {
+            const f = shift[i] * (1 - Math.abs(j - i) / (spreadK + 1));
+            if (Math.abs(f) > Math.abs(total2[j])) total2[j] = f;
+          }
+          s.w[i] = 20;
+        }
+        if (!moved) continue;
+        anyMoved = true;
+        for (let i = 0; i < s.u.length; i++) s.u[i] += total2[i];
+      }
+      untangle(true);
+      if (!anyMoved) break;
+    }
+    // smooth out small steps, but never onto the other colour
+    for (let round = 0; round < 2; round++) {
+      for (const [number, s] of samples) {
+        const sm = smooth(s.u);
+        for (let i = 0; i < s.u.length; i++) {
+          const v = (s.k0 + i) * STEP;
+          if (!otherAt(number, sm[i], v) || otherAt(number, s.u[i], v)) s.u[i] = sm[i];
+        }
+      }
+      untangle(true);
+    }
+    // no sharp kinks (where crowns of both colours close the way)
+    for (let round = 0; round < 3; round++) {
+      for (const s of samples.values()) {
+        const sm = smooth(s.u);
+        for (let i = 1; i < s.u.length - 1; i++) {
+          if (Math.abs(s.u[i - 1] - 2 * s.u[i] + s.u[i + 1]) > 0.15) for (let j = Math.max(0, i - 4); j <= Math.min(s.u.length - 1, i + 4); j++) s.u[j] = sm[j];
+        }
+      }
       untangle(false);
     }
     let linesMoved = 0;
@@ -2756,6 +2897,7 @@
           between_searched: gridSearch.between, found_between: gridSearch.betweenFound, offset_row_trees: gridSearch.runs,
           counted: gridSearch.counted, young_trees_added: gridSearch.added,
         },
+        young_row_walk: rowWalk,
         young_full_resolution: fineSearch && {
           positions_searched: fineSearch.on, found_on_positions: fineSearch.onFound,
           between_searched: fineSearch.between, found_between: fineSearch.betweenFound, offset_row_trees: fineSearch.runs,
