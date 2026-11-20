@@ -3,7 +3,7 @@
 A web dashboard for diagonal thinning of pecan orchards from drone images. Drop a drone image of any pecan orchard and it finds:
 
 - the pecan canopy (never grass, soil or shadow);
-- every crown, **young replanted trees included**: a small, round, sunlit crown as green as the pecan leaves, standing on an empty planting position on clean bare ground or casting its own shadow (flag YOUNG_TREE);
+- every crown, **young replanted trees included** (flag YOUNG_TREE): a small, round, sunlit crown as green as the pecan leaves on an empty planting position, standing on clean bare ground or casting its own shadow. Every empty position of the 40 × 20 ft planting grid is also searched for a sapling (an island of leaves on the tree strip). These saplings are counted only when the same search finds far fewer green spots halfway between planting positions, where nothing was planted, so weeds and grass are not counted;
 - the planting grid;
 - the EVEN / ODD thinning diagonals (along every row the crowns alternate blue, red, blue, also across a missing tree);
 - the canopy total of each diagonal;
@@ -36,7 +36,7 @@ Drop the orthomosaic and its DSM together (hold <kbd>Ctrl</kbd> to select both),
 ## What you see
 
 - **The drone image** with every pecan crown tinted in the colour of its diagonal: blue for EVEN, red for ODD. Along each planted row the crowns alternate blue, red, blue.
-- **The wavy thinning diagonals.** Each one runs from its first tree to its last tree and ends in an arrow.
+- **The wavy thinning diagonals.** Each one runs from its first tree to its last tree, carries on past them in the direction of the diagonal, and ends in an arrow that points along the diagonal.
 - **The canopy total (ft²) of each diagonal**, written at the end of its line (zoom in to read it), plus a table, a chart per diagonal and an EVEN vs ODD total chart.
 - **EVEN, ODD and overall totals**: canopy area (ft²), crowns and diagonals. Field area in acres, spacing and heights in feet (design 20 × 40 ft).
 - **Where to start.** Thinning removes the family (EVEN or ODD) with the smaller total canopy and starts on its first diagonal: D01 when ODD is smaller, D02 when EVEN is smaller. The start line is drawn thick with an arrow for the direction of travel and a small black "start" just beyond its first end; you can pick another one, and the thinning plan follows it. *Start only* hides the other lines.

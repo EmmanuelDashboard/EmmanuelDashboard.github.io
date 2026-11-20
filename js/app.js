@@ -1147,6 +1147,11 @@
         }
       }
     }
+    // The arrow points along the diagonal (the line ends in that direction).
+    if (best && state.axis) {
+      const [ax, ay] = state.axis, s = ax * best.dir[0] + ay * best.dir[1] < 0 ? -1 : 1;
+      best.dir = [s * ax, s * ay];
+    }
     return best;
   }
 
