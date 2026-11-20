@@ -36,7 +36,8 @@ Drop the orthomosaic and its DSM together (hold <kbd>Ctrl</kbd> to select both),
 ## What you see
 
 - **The drone image** with every pecan crown tinted in the colour of its diagonal: blue for EVEN, red for ODD. Along each planted row the crowns alternate blue, red, blue.
-- **The wavy thinning diagonals.** Each one runs from its first tree to its last tree, carries on past them in the direction of the diagonal, and ends in an arrow that points along the diagonal.
+- **The wavy thinning diagonals.** Each one is a single unbroken line from its first tree to its last tree, also across white areas (no image) inside the field. Past the end trees it carries on in the direction of the diagonal and ends in an arrow. All arrows point the same way. Lines never cross each other.
+- **Missing trees.** Small open rings mark the empty planting positions of the 40 × 20 ft grid inside a planted row, in gaps of up to 4 trees: no crown was seen there (a missing tree, or a sapling too small to measure). Their number is on the field card, and *Export* lists them with GPS positions. They are never counted as canopy.
 - **The canopy total (ft²) of each diagonal**, written at the end of its line (zoom in to read it), plus a table, a chart per diagonal and an EVEN vs ODD total chart.
 - **EVEN, ODD and overall totals**: canopy area (ft²), crowns and diagonals. Field area in acres, spacing and heights in feet (design 20 × 40 ft).
 - **Where to start.** Thinning removes the family (EVEN or ODD) with the smaller total canopy and starts on its first diagonal: D01 when ODD is smaller, D02 when EVEN is smaller. The start line is drawn thick with an arrow for the direction of travel and a small black "start" just beyond its first end; you can pick another one, and the thinning plan follows it. *Start only* hides the other lines.
@@ -59,6 +60,7 @@ Undo and redo with <kbd>Ctrl</kbd>+<kbd>Z</kbd> and <kbd>Ctrl</kbd>+<kbd>Y</kbd>
 - **Trees to remove (CSV with GPS)**, for the field crew (canopy in ft², height in ft, young trees marked).
 - **Result map image (JPG):** the whole field with crowns, diagonals, the start line, canopy (ft²) per line and the totals.
 - **EVEN vs ODD total chart (JPG).**
+- **Missing trees: empty planting positions (CSV with GPS)**, for replanting.
 - **Canopy per diagonal (CSV, ft²):** one row per diagonal, then the EVEN, ODD and ALL totals at the end.
 - **Crowns table (CSV)** and **corrected crowns (GeoJSON, WGS84)**, for GIS software.
 - **Corrections log (CSV).**

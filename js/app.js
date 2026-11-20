@@ -265,11 +265,12 @@
       lines: { EVEN: L.layerGroup(), ODD: L.layerGroup() },
       arrows: { EVEN: L.layerGroup(), ODD: L.layerGroup() },
       labels: L.layerGroup(),
+      empty: L.layerGroup(),
       start: L.layerGroup(),
       select: L.layerGroup(),
       draw: L.layerGroup(),
     };
-    for (const key of ["image", "crowns", "labels", "start", "select", "draw"]) layers[key].addTo(map);
+    for (const key of ["image", "crowns", "labels", "empty", "start", "select", "draw"]) layers[key].addTo(map);
     for (const f of ["EVEN", "ODD"]) { layers.lines[f].addTo(map); layers.arrows[f].addTo(map); }
 
     L.control.scale({ imperial: true, metric: false, position: "bottomleft", maxWidth: 160 }).addTo(map);
@@ -857,11 +858,11 @@
   }
 
   function resetState() {
-    for (const group of [layers.image, layers.crowns, layers.labels, layers.start, layers.select, layers.draw]) group.clearLayers();
+    for (const group of [layers.image, layers.crowns, layers.labels, layers.empty, layers.start, layers.select, layers.draw]) group.clearLayers();
     for (const f of ["EVEN", "ODD"]) { layers.lines[f].clearLayers(); layers.arrows[f].clearLayers(); }
     if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
     Object.assign(state, {
-      loaded: false, crowns: new Map(), diagonals: new Map(), selected: null, selectedDiagonal: null,
+      loaded: false, crowns: new Map(), diagonals: new Map(), selected: null, selectedDiagonal: null, empty: [],
       mode: "select", mergeFrom: null, history: [], future: [], addedCount: 0, startOnly: false, previewUrl: null,
     });
     $("toggle-start-only").checked = false;
@@ -1014,6 +1015,7 @@
       }
     }
     if (!state.crowns.size) throw new Error("No pecan crowns were found in this image.");
+    state.empty = (result.empty_positions || []).map((e) => ({ x: e.x, y: e.y, row: e.grid_row, tree: e.grid_tree }));
     state.bounds = L.latLngBounds([bounds[1], bounds[0]], [bounds[3], bounds[2]]);
     finishDataset({ url: meta.previewUrl, bounds: [[0, 0], [meta.heightM, meta.widthM]] }, "");
   }
@@ -1044,6 +1046,7 @@
 
     drawCrowns();
     drawDiagonals();
+    drawEmpty();
     state.loaded = true;
 
     $("dropzone").hidden = true;
@@ -1132,27 +1135,36 @@
     for (const c of list) if (c.layer && !c.removed) c.layer.setStyle(crownStyle(c));
   }
 
-  // End of a diagonal: lowest (southern-most) end, as in the notebook maps.
-  function diagonalEnd(d) {
-    let best = null;
+  // Direction of travel, the same for every diagonal of the field: along the
+  // diagonals towards the south (towards the west when they run east-west).
+  function travelAxis() {
+    if (!state.axis) return [0, -1];
+    let [ax, ay] = state.axis;
+    if (ay > 1e-6 || (Math.abs(ay) <= 1e-6 && ax > 0)) { ax = -ax; ay = -ay; }
+    return [ax, ay];
+  }
+
+  // The two ends of a diagonal along the direction of travel: `last` gets
+  // the arrow (pointing along the diagonal), `first` the word "start".
+  function diagonalEnds(d) {
+    const [ax, ay] = travelAxis();
+    let first = null, last = null;
     for (const piece of d.pieces) {
-      for (const [i, j] of [[0, 1], [piece.length - 1, piece.length - 2]]) {
-        const tip = piece[i];
-        if (!best || tip[1] < best.tip[1]) {
-          let k = j, back = piece[j];
-          const step = i === 0 ? 1 : -1;
-          while (k > 0 && k < piece.length - 1 && Math.hypot(back[0] - tip[0], back[1] - tip[1]) < 3) { k += step; back = piece[k]; }
-          const len = Math.hypot(tip[0] - back[0], tip[1] - back[1]) || 1;
-          best = { tip, dir: [(tip[0] - back[0]) / len, (tip[1] - back[1]) / len], piece, atStart: i === 0 };
-        }
+      if (piece.length < 2) continue;
+      for (const tip of [piece[0], piece[piece.length - 1]]) {
+        const t = tip[0] * ax + tip[1] * ay;
+        if (!last || t > last.t) last = { tip, t };
+        if (!first || t < first.t) first = { tip, t };
       }
     }
-    // The arrow points along the diagonal (the line ends in that direction).
-    if (best && state.axis) {
-      const [ax, ay] = state.axis, s = ax * best.dir[0] + ay * best.dir[1] < 0 ? -1 : 1;
-      best.dir = [s * ax, s * ay];
-    }
-    return best;
+    if (!last) return null;
+    return { first: { tip: first.tip, dir: [-ax, -ay] }, last: { tip: last.tip, dir: [ax, ay] } };
+  }
+
+  // End of a diagonal (where its arrow is).
+  function diagonalEnd(d) {
+    const ends = diagonalEnds(d);
+    return ends ? ends.last : null;
   }
 
   function diagonalTop(d) {
@@ -1294,22 +1306,26 @@
     }
   }
 
-  // Where the word "start" goes: just beyond the first (upper) end of the
-  // start line, continuing the line outward, so it sits off the crowns.
+  // Where the word "start" goes: just beyond the first end of the start line
+  // (opposite the arrow), continuing the line outward, off the crowns.
   function startLabelPoint(d, gapM = 2.5) {
-    let best = null;
-    for (const piece of d.pieces) {
-      if (piece.length < 2) continue;
-      for (const [i, step] of [[0, 1], [piece.length - 1, -1]]) {
-        const tip = piece[i];
-        if (best && tip[1] <= best.tip[1]) continue;
-        let k = i + step, back = piece[k];
-        while (k > 0 && k < piece.length - 1 && Math.hypot(back[0] - tip[0], back[1] - tip[1]) < 3) { k += step; back = piece[k]; }
-        const len = Math.hypot(tip[0] - back[0], tip[1] - back[1]) || 1;
-        best = { tip, dir: [(tip[0] - back[0]) / len, (tip[1] - back[1]) / len] };
-      }
+    const ends = diagonalEnds(d);
+    if (!ends) return null;
+    const { tip, dir } = ends.first;
+    return [tip[0] + dir[0] * gapM, tip[1] + dir[1] * gapM];
+  }
+
+  // Empty planting positions (missing trees): a small open ring where the
+  // 40 × 20 ft grid says a tree should stand but none was seen.
+  function drawEmpty() {
+    layers.empty.clearLayers();
+    for (const e of state.empty || []) {
+      L.circleMarker(toLL([e.x, e.y]), {
+        renderer: renderers.select, pane: "select", radius: 4, color: "#111111", weight: 1.6, fillColor: "#ffffff", fillOpacity: 0.75,
+      }).bindTooltip(`<strong>Empty planting position</strong> · row ${e.row}, tree ${e.tree}<br>no crown seen: missing tree, or a sapling too small to measure`, { className: "crown-tip", direction: "top", offset: [0, -4] })
+        .addTo(layers.empty);
     }
-    return best ? [best.tip[0] + best.dir[0] * gapM, best.tip[1] + best.dir[1] * gapM] : null;
+    $("layer-empty").disabled = !(state.empty && state.empty.length);
   }
 
   function drawSelection() {
@@ -1344,6 +1360,9 @@
     const imageOn = $("layer-image").checked;
     if (imageOn && !map.hasLayer(layers.image)) layers.image.addTo(map);
     if (!imageOn && map.hasLayer(layers.image)) map.removeLayer(layers.image);
+    const emptyOn = $("layer-empty").checked && !state.startOnly;
+    if (emptyOn && !map.hasLayer(layers.empty)) layers.empty.addTo(map);
+    if (!emptyOn && map.hasLayer(layers.empty)) map.removeLayer(layers.empty);
     updateLabelVisibility();
   }
 
@@ -1533,6 +1552,18 @@
     download(`${fileBase()}_trees_to_remove_${fam}.csv`, lines.join("\n") + "\n");
   }
 
+  // Missing trees: empty planting positions of the 40 × 20 ft grid.
+  function exportEmptyCsv() {
+    const header = ["n", "grid_row", "grid_tree", ...(state.toLonLat ? ["longitude", "latitude"] : ["x_m", "y_m"])];
+    const lines = [csvRow(header)];
+    const list = (state.empty || []).slice().sort((p, q) => p.row - q.row || p.tree - q.tree);
+    list.forEach((e, k) => {
+      const where = state.toLonLat ? state.toLonLat(e.x, e.y).map((v) => v.toFixed(8)) : [e.x.toFixed(2), e.y.toFixed(2)];
+      lines.push(csvRow([k + 1, e.row, e.tree, ...where]));
+    });
+    download(`${fileBase()}_missing_trees.csv`, lines.join("\n") + "\n");
+  }
+
   function fillFieldCard() {
     const s = state.summary || {};
     const ds = s.diagonal_settings || {};
@@ -1551,6 +1582,7 @@
     if (s.field_area_m2) facts.push(["Field area", `${fmt1(s.field_area_m2 / 4046.8564224)} acres · ${fmtArea(s.field_area_m2)}`]);
     const youngCount = [...state.crowns.values()].filter((c) => /YOUNG_TREE/.test((c.props && c.props.review_flags) || "")).length;
     if (youngCount) facts.push(["Young trees", fmtInt(youngCount)]);
+    if (state.empty && state.empty.length) facts.push(["Missing trees", `${fmtInt(state.empty.length)} empty planting positions`]);
     facts.push([s.source === "browser" ? "Crowns found" : "Crowns (notebook)", fmtInt(state.crowns.size)]);
     if (s.segmentation && s.segmentation.elevation) facts.push(["Elevation (DSM)", elevationUsed ? "used: tree heights" : "not used"]);
     $("field-facts").innerHTML = facts.map(([k, v]) => `<dt>${k}</dt><dd title="${String(v).replace(/"/g, "&quot;")}">${escapeHtml(String(v))}</dd>`).join("");
@@ -2256,6 +2288,18 @@
       }
       ctx.globalAlpha = 1;
 
+      // Missing trees (empty planting positions): small open rings.
+      if ($("layer-empty").checked && !state.startOnly) {
+        const rad = Math.max(2.5, 0.45 * s);
+        ctx.lineWidth = Math.max(1, 0.12 * s);
+        for (const e of state.empty || []) {
+          ctx.beginPath();
+          ctx.arc(X(e.x), Y(e.y), rad, 0, 2 * Math.PI);
+          ctx.fillStyle = "rgba(255,255,255,0.75)"; ctx.fill();
+          ctx.strokeStyle = "#111111"; ctx.stroke();
+        }
+      }
+
       // Diagonals with arrows, then the START line on top.
       const lineW = Math.max(1.2, 0.3 * s);
       const drawLine = (piece, colour, width) => {
@@ -2458,13 +2502,14 @@
       if (kind === "log") exportLog();
       if (kind === "map-jpg") exportMapJpg().catch((err) => { console.error(err); toast("The map image could not be made: " + (err.message || err), "error", 6000); });
       if (kind === "family-chart") exportFamilyChart();
+      if (kind === "missing-csv") exportEmptyCsv();
       if (kind === "print") window.print();
     });
 
     $("btn-help").addEventListener("click", () => $("help-modal").showModal());
     $("link-about").addEventListener("click", (e) => { e.preventDefault(); $("about-modal").showModal(); });
 
-    for (const id of ["layer-image", "layer-crowns", "layer-even", "layer-odd", "layer-labels"]) $(id).addEventListener("change", applyLineVisibility);
+    for (const id of ["layer-image", "layer-crowns", "layer-even", "layer-odd", "layer-labels", "layer-empty"]) $(id).addEventListener("change", applyLineVisibility);
     $("fill-opacity").addEventListener("input", (e) => { state.fillOpacity = +e.target.value; restyleCrowns(); });
 
     // Plan and start go together: removing a family starts on its first line.

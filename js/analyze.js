@@ -20,9 +20,12 @@
  *      sapling (an island of leaves on the tree strip), counted only when
  *      the same search finds far fewer spots halfway between positions
  *      (planted saplings, not weeds);
- *   8. EVEN / ODD diagonals as wavy lines through the crowns, ending in the
- *      direction of the diagonal; along every row neighbouring crowns always
- *      alternate (1 blue, 2 red ...), also across a missing tree.
+ *   8. EVEN / ODD diagonals as wavy lines through the crowns, one unbroken
+ *      line per diagonal (also across white areas), ending in the direction
+ *      of the diagonal, never crossing each other; along every row
+ *      neighbouring crowns always alternate (1 blue, 2 red ...), also across
+ *      a missing tree;
+ *   9. empty planting positions (missing trees) from the 40 x 20 ft grid.
  * Input: RGBA pixels on a square grid of `pixel` metres (north up), and
  * optionally `surface`: DSM elevation on the same grid (NaN = no data).
  */
@@ -1748,6 +1751,55 @@
     // (young trees on their planting position excepted).
     for (let t = 0; t < total; t++) if (area2[t + 1] * area < 2.0 && !young[t]) aliveAll[t] = 0;
 
+    // Empty planting positions (missing trees): inside a planted row, in a
+    // gap of at most 4 trees (a longer gap is unplanted ground), where the
+    // 40 × 20 ft grid says a tree stands (from its planted neighbours) but
+    // no crown or young tree was found and the ground is open (no crown
+    // within 0.6 m), at least half a tree spacing inside the field. Marked
+    // on the map, never counted as canopy.
+    const emptySites = [];
+    {
+      const have = new Map(), span = new Map();
+      for (let t = 0; t < total; t++) {
+        if (!pos[t] || !aliveAll[t]) continue;
+        have.set(siteOf(pos[t]), pts[t]);
+        const [i, j] = pos[t], r = span.get(j);
+        span.set(j, r ? [Math.min(r[0], i), Math.max(r[1], i)] : [i, i]);
+      }
+      const rowSp = len(b), rr = Math.max(1, Math.round(0.6 / pixel));
+      const edgeDist = edt(valid, w, h);
+      for (const [q, [lo, hi]] of span) {
+        for (let p = lo + 1; p < hi; p++) {
+          if (have.has(p + "," + q)) continue;
+          let gapLo = p, gapHi = p;
+          while (!have.has((gapLo - 1) + "," + q)) gapLo--;
+          while (!have.has((gapHi + 1) + "," + q)) gapHi++;
+          if (gapHi - gapLo + 1 > 4) { p = gapHi; continue; }
+          const est = [];
+          for (let dq = -1; dq <= 1; dq++) for (let dp = -3; dp <= 3; dp++) {
+            const s = have.get((p + dp) + "," + (q + dq));
+            if (s) est.push([Math.abs(dp) * inRow + Math.abs(dq) * rowSp, s[0] - dp * a[0] - dq * b[0], s[1] - dp * a[1] - dq * b[1]]);
+          }
+          if (est.length < 2) continue;
+          est.sort((e1, e2) => e1[0] - e2[0]);
+          const use = est.slice(0, 6);
+          const spot = [percentile(use.map((e) => e[1]), 50), percentile(use.map((e) => e[2]), 50)];
+          const c = Math.floor(spot[0] / pixel), r = h - 1 - Math.floor(spot[1] / pixel);
+          if (c < 0 || r < 0 || c >= w || r >= h || !valid[r * w + c]) continue;
+          if (edgeDist[r * w + c] * pixel < 0.5 * inRow) continue;
+          let open = true;
+          for (let dy = -rr; dy <= rr && open; dy++) for (let dx = -rr; dx <= rr && open; dx++) {
+            if (dx * dx + dy * dy > rr * rr) continue;
+            const x = c + dx, y = r + dy;
+            if (x < 0 || y < 0 || x >= w || y >= h) continue;
+            const l = labels[y * w + x];
+            if (l && aliveAll[l - 1]) open = false;
+          }
+          if (open) emptySites.push({ spot, pos: [p, q] });
+        }
+      }
+    }
+
     // ---------------- diagonals
     await step("Drawing the EVEN / ODD diagonals …");
     const angle = (v) => ((Math.atan2(-v[1], v[0]) * 180) / Math.PI + 360) % 180;
@@ -1897,36 +1949,115 @@
     const ext = new Map();
     for (const list of byDiag.values()) for (const t of list) ext.set(t, extent(t));
 
-    const lines = new Map();
+    // One unbroken line per diagonal, from its first to its last crown, also
+    // across white areas (no image) inside the field.
+    const uvLines = new Map();
     for (const [number, members] of [...byDiag.entries()].sort((p, q) => p[0] - q[0])) {
       const crossing = crossingFor(number);
       let separate = new Set();
-      let pieces2 = [];
+      let uv = [];
       for (let attempt = 0; attempt < 2; attempt++) {
-        const uv = wavy(members, ext, crossing, separate);
-        // inside the field, each piece from its first to its last own crown
-        pieces2 = [];
-        let run = [];
-        for (const [u, v] of uv) {
-          const xy = toXY(u, v);
-          if (validAt(xy[0], xy[1])) run.push([u, v, xy]);
-          else { if (run.length > 1) pieces2.push(run); run = []; }
-        }
-        if (run.length > 1) pieces2.push(run);
-        pieces2 = pieces2.map((piece) => {
-          const v0 = piece[0][1], v1 = piece[piece.length - 1][1];
-          const own = members.filter((t) => V(knots[t]) >= v0 && V(knots[t]) <= v1);
-          if (!own.length) return null;
-          const lo = Math.min(...own.map((t) => ext.get(t)[0])) - 1.5, hi = Math.max(...own.map((t) => ext.get(t)[1])) + 1.5;
-          const kept2 = piece.filter(([, v]) => v >= lo && v <= hi).map(([, , xy]) => xy);
-          return kept2.length > 1 ? kept2 : null;
-        }).filter(Boolean);
+        uv = wavy(members, ext, crossing, separate);
         const hit = new Set();
-        for (const piece of pieces2) for (const [x, y] of piece) { const l = labelAt(x, y); if (l > 0) hit.add(l); }
+        for (const [u, v] of uv) { const [x, y] = toXY(u, v); const l = labelAt(x, y); if (l > 0) hit.add(l); }
         separate = new Set(members.filter((t) => !hit.has(t + 1)));
         if (!separate.size) break;
       }
-      lines.set(number, pieces2);
+      uvLines.set(number, uv);
+    }
+
+    // Lines never cross: at every point across the rows the lines keep the
+    // order of their numbers, at least 0.3 tree spacings apart. Where two
+    // would cross, both give way the least possible (weighted isotonic
+    // regression; a line running through its own crown gives way less).
+    const STEP = 0.25, gapU = 0.2 * inRow;
+    const samples = new Map();
+    let kMin = Infinity, kMax = -Infinity;
+    for (const [number, uv] of uvLines) {
+      const k0 = Math.ceil(uv[0][1] / STEP), k1 = Math.floor(uv[uv.length - 1][1] / STEP);
+      if (k1 < k0) continue;
+      const u = new Float64Array(k1 - k0 + 1), wt = new Float64Array(k1 - k0 + 1);
+      let j = 0;
+      for (let k = k0; k <= k1; k++) {
+        const v = k * STEP;
+        while (j < uv.length - 2 && uv[j + 1][1] < v) j++;
+        const [ua, va] = uv[j], [ub, vb] = uv[Math.min(j + 1, uv.length - 1)];
+        const f = vb > va ? Math.min(1, Math.max(0, (v - va) / (vb - va))) : 0;
+        u[k - k0] = ua + f * (ub - ua);
+        const [x, y] = toXY(u[k - k0], v);
+        const l = labelAt(x, y);
+        wt[k - k0] = l > 0 && diagOfLabel[l] === number ? 10 : 1;
+      }
+      samples.set(number, { k0, k1, u, wt });
+      kMin = Math.min(kMin, k0); kMax = Math.max(kMax, k1);
+    }
+    const order = [...samples.keys()].sort((p, q) => p - q);
+    let trendSum = 0;
+    for (let k = kMin; k <= kMax; k += 4) {
+      let prev = null;
+      for (const number of order) {
+        const s = samples.get(number);
+        if (k < s.k0 || k > s.k1) continue;
+        const u = s.u[k - s.k0];
+        if (prev) trendSum += Math.sign(u - prev[1]) / (number - prev[0]);
+        prev = [number, u];
+      }
+    }
+    const sgn = trendSum < 0 ? -1 : 1;
+    // one pass: at every point across the rows, the order is restored with
+    // the least (weighted) movement (pool adjacent violators on
+    // y = sgn·u − gap·number, which must not decrease)
+    const untangle = (useWeights) => {
+      for (let k = kMin; k <= kMax; k++) {
+        const at = [];
+        for (const number of order) { const s = samples.get(number); if (k >= s.k0 && k <= s.k1) at.push([number, s]); }
+        if (at.length < 2) continue;
+        const blocks = [];
+        for (const [number, s] of at) {
+          const i = k - s.k0, wi = useWeights ? s.w[i] : 1;
+          blocks.push({ sum: wi * (sgn * s.u[i] - gapU * number), w: wi, n: 1 });
+          while (blocks.length > 1 && blocks[blocks.length - 2].sum / blocks[blocks.length - 2].w > blocks[blocks.length - 1].sum / blocks[blocks.length - 1].w) {
+            const top = blocks.pop(), below = blocks[blocks.length - 1];
+            below.sum += top.sum; below.w += top.w; below.n += top.n;
+          }
+        }
+        let idx = 0;
+        for (const bl of blocks) {
+          const y = bl.sum / bl.w;
+          for (let q = 0; q < bl.n; q++, idx++) { const [number, s] = at[idx]; s.u[k - s.k0] = sgn * (y + gapU * number); }
+        }
+      }
+    };
+    // moving average over ±1 m along the line
+    const smooth = (arr) => {
+      const out = new Float64Array(arr.length), r = 4;
+      for (let i = 0; i < arr.length; i++) {
+        let sum = 0, c = 0;
+        for (let j = Math.max(0, i - r); j <= Math.min(arr.length - 1, i + r); j++) { sum += arr[j]; c++; }
+        out[i] = sum / c;
+      }
+      return out;
+    };
+    for (const s of samples.values()) { s.w = smooth(s.wt); s.u0 = Float64Array.from(s.u); }
+    untangle(true);
+    // the shifts are smoothed along each line (gentle bends, no notches),
+    // then a last pass guarantees the order again
+    for (const s of samples.values()) {
+      const delta = smooth(s.u.map((u, i) => u - s.u0[i]));
+      for (let i = 0; i < s.u.length; i++) s.u[i] = s.u0[i] + delta[i];
+    }
+    untangle(false);
+    let linesMoved = 0;
+    for (const s of samples.values()) for (let i = 0; i < s.u.length; i++) if (Math.abs(s.u[i] - s.u0[i]) > 0.05) linesMoved++;
+    // Only the ends of a line are cut at the edge of the field.
+    const lines = new Map();
+    for (const [number, uv] of uvLines) {
+      const s = samples.get(number);
+      const pts2 = s ? Array.from(s.u, (u, i) => toXY(u, (s.k0 + i) * STEP)) : uv.map(([u, v]) => toXY(u, v));
+      let i0 = 0, i1 = pts2.length - 1;
+      while (i0 <= i1 && !validAt(pts2[i0][0], pts2[i0][1])) i0++;
+      while (i1 >= i0 && !validAt(pts2[i1][0], pts2[i1][1])) i1--;
+      lines.set(number, i1 > i0 ? [pts2.slice(i0, i1 + 1)] : []);
     }
 
     // Off-grid crowns take the diagonal whose line runs through them.
@@ -2055,6 +2186,7 @@
     return {
       crowns,
       diagonals: [...lines.entries()].map(([number, pieces3]) => ({ number, pieces: pieces3 })),
+      empty_positions: emptySites.map((e) => ({ x: e.spot[0], y: e.spot[1], grid_row: e.pos[1] - minJ + 1, grid_tree: e.pos[0] - minI + 1 })),
       settings: {
         in_row_spacing_m: inRow,
         row_spacing_m: rowSpacing,
@@ -2073,6 +2205,8 @@
           positions_searched: gridSearch.on, found_on_positions: gridSearch.onFound,
           between_searched: gridSearch.between, found_between: gridSearch.betweenFound, counted: gridSearch.counted,
         },
+        empty_planting_positions: emptySites.length,
+        line_points_moved_to_avoid_crossing: linesMoved,
         row_neighbours: rowPairs,
         row_neighbours_same_colour: rowSame,
         crowns_crossed_by_their_diagonal: onGrid ? crossedOwn / onGrid : null,
