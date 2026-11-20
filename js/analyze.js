@@ -2251,7 +2251,7 @@
           for (let u = list[0].u - 3 * inRow; u <= list[list.length - 1].u + 3 * inRow; u += rIn) for (const lane of [0, -0.8, 0.8]) {
             const v = vAt(u) + lane * rIn;
             const r = findSapling(u * ah[0] + v * acr[0], u * ah[1] + v * acr[1], L);
-            if (!r || !r.pick || r.pick.list.length * area < 0.45) continue;
+            if (!r || !r.pick || r.pick.list.length * area < 0.45 || r.pick.list.length * area > 3.5) continue;  // young-crown sized
             const pk = r.pick, pu = Uf(pk.spot);
             if (Math.abs(Vf(pk.spot) - vAt(pu)) > 1.6 * rIn) continue;                    // on the line
             let clear = Infinity;
@@ -2279,7 +2279,7 @@
           // the alley beside the row, where nothing was planted: the check
           rowWalk.inAlleys += walk(list, 0.5 * rowSp, null);
         }
-        rowWalk.counted = rowWalk.onRows >= 3 && rowWalk.inAlleys <= 0.15 * rowWalk.onRows;
+        rowWalk.counted = rowWalk.onRows >= 3 && rowWalk.inAlleys <= 0.15 * rowWalk.onRows + 1;
         for (const { pk, nearOwn } of rowWalk.counted ? cands : []) {
           const pu = Uf(pk.spot);
           {
