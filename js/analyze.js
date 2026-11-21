@@ -2634,21 +2634,41 @@
       const lenB = Math.max(vk[0] - begin, toEdgeAlong(uk[0], vk[0], -1));
       const lenE = Math.max(end - vk[vk.length - 1], toEdgeAlong(uk[uk.length - 1], vk[vk.length - 1], 1));
       const line = [];
+      // Clean diagonal: a smooth curve through the line's trees (no S-bend
+      // at every tree), straight along the diagonal where the trees are,
+      // and straight on along the diagonal past its end trees.
+      const nk = vk.length, sec = [], tan = new Array(nk);
+      for (let k = 0; k < nk - 1; k++) sec.push((uk[k + 1] - uk[k]) / (vk[k + 1] - vk[k]));
+      for (let k = 0; k < nk; k++) {
+        if (k === 0 || k === nk - 1) { tan[k] = slope; continue; }
+        const s0 = sec[k - 1], s1 = sec[k];
+        if (s0 * s1 <= 0) { tan[k] = 0; continue; }
+        tan[k] = (s0 + s1) / 2;
+        const lim = 3 * Math.min(Math.abs(s0), Math.abs(s1));                 // no overshoot
+        if (Math.abs(tan[k]) > lim) tan[k] = Math.sign(tan[k]) * lim;
+      }
+      const curve = (q) => (v) => {
+        const v0 = vk[q], v1 = vk[q + 1], H = v1 - v0, t = Math.max(0, Math.min(1, (v - v0) / H));
+        const t2 = t * t, t3 = t2 * t;
+        return (2 * t3 - 3 * t2 + 1) * uk[q] + (t3 - 2 * t2 + t) * H * tan[q] + (-2 * t3 + 3 * t2) * uk[q + 1] + (t3 - t2) * H * tan[q + 1];
+      };
       const nb = Math.max(3, Math.ceil(lenB / 0.25));
-      for (let s = 0; s < nb; s++) { const d = lenB * (1 - s / nb); line.push([uk[0] - slope * tail(d, lenB), vk[0] - d]); }
+      for (let s = 0; s < nb; s++) { const d = lenB * (1 - s / nb); line.push([uk[0] - slope * d, vk[0] - d]); }
       line.push([uk[0], vk[0]]);
-      for (let q = 0; q < vk.length - 1; q++) {
-        const seg = route(number, uk[q], vk[q], uk[q + 1], vk[q + 1]);
+      for (let q = 0; q < nk - 1; q++) {
+        const cq = curve(q);
+        const seg = route(number, uk[q], vk[q], uk[q + 1], vk[q + 1], cq);
         if (seg) { line.push(...seg); continue; }
         const v0 = vk[q], v1 = vk[q + 1];
         const steps = Math.max(3, Math.ceil((v1 - v0) / 0.25));
         for (let s = 1; s <= steps; s++) {
           const v = v0 + ((v1 - v0) * s) / steps;
-          line.push([uk[q] + (uk[q + 1] - uk[q]) * ease((v - v0) / (v1 - v0)), v]);
+          line.push([cq(v), v]);
         }
       }
       const ne = Math.max(3, Math.ceil(lenE / 0.25)), uL = uk[uk.length - 1], vL = vk[vk.length - 1];
-      for (let s = 1; s <= ne; s++) { const d = (lenE * s) / ne; line.push([uL + slope * tail(d, lenE), vL + d]); }
+      for (let s = 1; s <= ne; s++) { const d = (lenE * s) / ne; line.push([uL + slope * d, vL + d]); }
+      void tail;
       return line;
     }
 
@@ -2656,18 +2676,27 @@
     // canopy of the other colour (dynamic programming over the steps across
     // the rows, sideways moves cost a little, and it stays near the usual
     // smooth wave where nothing is in the way). null: too short to route.
-    function route(number, u0, v0, u1, v1) {
+    function route(number, u0, v0, u1, v1, curveFn) {
       const dv = 0.25, du = 0.25;
       const n = Math.round((v1 - v0) / dv);
       if (n < 4 || Math.abs(u1 - u0) > 2 * du * n) return null;
       const uLo = Math.min(u0, u1) - 0.75 * inRow, m = Math.ceil((Math.max(u0, u1) + 0.75 * inRow - uLo) / du) + 1;
       const fam2 = Math.abs(number) % 2, depthOther = depthIn[1 - fam2];
+      const ideal = curveFn || ((v) => u0 + (u1 - u0) * ease((v - v0) / (v1 - v0)));
+      // the clean curve itself when it keeps off the other colour
+      let blocked = false;
+      for (let i = 1; i < n && !blocked; i++) {
+        const v = v0 + ((v1 - v0) * i) / n, [x, y] = toXY(ideal(v), v);
+        const c = Math.floor(x / pixel), r = h - 1 - Math.floor(y / pixel);
+        if (c >= 0 && r >= 0 && c < w && r < h && depthOther[r * w + c] > 0) blocked = true;
+      }
+      if (!blocked) return null;
       const cost = new Float64Array((n + 1) * m).fill(Infinity), back = new Int16Array((n + 1) * m);
       const j0 = Math.round((u0 - uLo) / du), j1 = Math.round((u1 - uLo) / du);
       cost[j0] = 0;
       for (let i = 1; i <= n; i++) {
         const v = v0 + ((v1 - v0) * i) / n;
-        const uEase = u0 + (u1 - u0) * ease(i / n);
+        const uEase = ideal(v);
         for (let j = 0; j < m; j++) {
           const u = uLo + j * du;
           const [x, y] = toXY(u, v);
@@ -2694,6 +2723,19 @@
         for (let k = Math.max(0, i - 2); k <= Math.min(n, i + 2); k++) { s += us[k]; c++; }
         sm[i] = s / c;
       }
+      // a detour only when it really clears the other colour (in closed
+      // canopy it would not, and would only make the line untidy)
+      const overOther = (uf) => {
+        let o = 0;
+        for (let i = 1; i < n; i++) {
+          const v = v0 + ((v1 - v0) * i) / n, [x, y] = toXY(uf(i, v), v);
+          const c = Math.floor(x / pixel), r = h - 1 - Math.floor(y / pixel);
+          if (c >= 0 && r >= 0 && c < w && r < h && depthOther[r * w + c] > 0) o++;
+        }
+        return o * dv;
+      };
+      const oCurve = overOther((i, v) => ideal(v)), oPath = overOther((i) => sm[i]);
+      if (oPath > 0.3 * oCurve || oCurve - oPath < 0.5) return null;
       const out = [];
       for (let i = 1; i <= n; i++) out.push([sm[i], v0 + ((v1 - v0) * i) / n]);
       return out;
@@ -2876,8 +2918,12 @@
           s.w[i] = 20;
         }
         if (!moved) continue;
+        // keep the move only where it clears most of the other colour
+        const onOther = (arr) => { let o = 0; for (let i = 0; i < arr.length; i++) if (otherAt(number, arr[i], (s.k0 + i) * STEP)) o++; return o; };
+        const tried = s.u.map((u, i) => u + total2[i]);
+        if (onOther(tried) > 0.5 * onOther(s.u)) { for (let i = 0; i < s.u.length; i++) if (shift[i]) s.w[i] = 1; continue; }
         anyMoved = true;
-        for (let i = 0; i < s.u.length; i++) s.u[i] += total2[i];
+        for (let i = 0; i < s.u.length; i++) s.u[i] = tried[i];
       }
       untangle(true);
       if (!anyMoved) break;
@@ -2900,6 +2946,30 @@
         for (let i = 1; i < s.u.length - 1; i++) {
           if (Math.abs(s.u[i - 1] - 2 * s.u[i] + s.u[i + 1]) > 0.15) for (let j = Math.max(0, i - 4); j <= Math.min(s.u.length - 1, i + 4); j++) s.u[j] = sm[j];
         }
+      }
+      untangle(false);
+    }
+    // presentable: a wide final smoothing (about ±2 m), where it does not
+    // put the line on more canopy of the other colour; order kept
+    const wide = (arr, r) => {
+      const out = new Float64Array(arr.length);
+      for (let i = 0; i < arr.length; i++) {
+        let s2 = 0, c = 0;
+        for (let j = Math.max(0, i - r); j <= Math.min(arr.length - 1, i + r); j++) { s2 += arr[j]; c++; }
+        out[i] = s2 / c;
+      }
+      return out;
+    };
+    for (let round = 0; round < 3; round++) {
+      for (const [number, s] of samples) {
+        const sm = wide(wide(s.u, 8), 8);
+        let before = 0, after = 0;
+        for (let i = 0; i < s.u.length; i++) {
+          const v = (s.k0 + i) * STEP;
+          if (otherAt(number, s.u[i], v)) before++;
+          if (otherAt(number, sm[i], v)) after++;
+        }
+        if (after <= 1.15 * before + 0.01 * s.u.length) for (let i = 0; i < s.u.length; i++) s.u[i] = sm[i];
       }
       untangle(false);
     }
