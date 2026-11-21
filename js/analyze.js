@@ -2243,15 +2243,15 @@
         const cands = [];
         // walk one line (the row, or the alley beside it: lineShift = 0 or
         // half a row spacing); young crowns found, at least minGap apart
-        const walk = (list, lineShift, keep) => {
+        const walk = (list, lineShift, keep, finder = (x, y) => findSapling(x, y, L), minA = 0.45) => {
           const nearOwn = (u, k) => list.map((o) => [Math.abs(o.u - u), o]).sort((x, y) => x[0] - y[0]).slice(0, k).map((x) => x[1]);
           const vAt = (u) => percentile(nearOwn(u, 3).map((o) => o.v), 50) + lineShift;
           const picks = [];
           // three lanes along the line (a big tree's top may sit off the strip centre)
           for (let u = list[0].u - 3 * inRow; u <= list[list.length - 1].u + 3 * inRow; u += rIn) for (const lane of [0, -0.8, 0.8]) {
             const v = vAt(u) + lane * rIn;
-            const r = findSapling(u * ah[0] + v * acr[0], u * ah[1] + v * acr[1], L);
-            if (!r || !r.pick || r.pick.list.length * area < 0.45 || r.pick.list.length * area > 3.5) continue;  // young-crown sized
+            const r = finder(u * ah[0] + v * acr[0], u * ah[1] + v * acr[1]);
+            if (!r || !r.pick || r.pick.list.length * area < minA || r.pick.list.length * area > 3.5) continue;  // young-crown sized
             const pk = r.pick, pu = Uf(pk.spot);
             if (Math.abs(Vf(pk.spot) - vAt(pu)) > 1.6 * rIn) continue;                    // on the line
             let clear = Infinity;
@@ -2298,6 +2298,8 @@
             for (const u2 of pk.list) { labels[u2] = id; mask[u2] = 1; }
             extra.push({ pos: ps, spot: pk.spot, size: pk.list.length, young: true });
             rowWalk.added++;
+            const lst = cands.find((c) => c.pk === pk).list;
+            lst.push({ u: pu, v: Vf(pk.spot), pos: ps, pt: pk.spot });
           }
         }
       }
@@ -2748,6 +2750,22 @@
       let i0 = 0, i1 = pts2.length - 1;
       while (i0 <= i1 && !validAt(pts2[i0][0], pts2[i0][1])) i0++;
       while (i1 >= i0 && !validAt(pts2[i1][0], pts2[i1][1])) i1--;
+      // Past its first and last own crown, a line runs on to the field
+      // edge only as long as the way is clear: it stops before a crown of
+      // the other colour (never over it).
+      const kind = (p) => {
+        const l = labelAt(p[0], p[1]);
+        if (!(l > 0) || diagOfLabel[l] === 0) return 0;
+        return Math.abs(diagOfLabel[l]) % 2 === Math.abs(number) % 2 ? 1 : -1;
+      };
+      let f0 = i0;
+      while (f0 <= i1 && kind(pts2[f0]) !== 1) f0++;
+      let f1 = i1;
+      while (f1 >= i0 && kind(pts2[f1]) !== 1) f1--;
+      if (f0 <= f1) {
+        for (let j = f0 - 1; j >= i0; j--) if (kind(pts2[j]) === -1) { i0 = Math.min(f0, j + 3); break; }
+        for (let j = f1 + 1; j <= i1; j++) if (kind(pts2[j]) === -1) { i1 = Math.max(f1, j - 3); break; }
+      }
       lines.set(number, i1 > i0 ? [pts2.slice(i0, i1 + 1)] : []);
     }
 
