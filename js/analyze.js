@@ -904,6 +904,42 @@
       for (let i = 0; i < W * H; i++) if (Number.isNaN(terrain[i]) && support[i] > 0.15) terrain[i] = estimate[i] / Math.max(support[i], 1e-6);
     }
     for (let i = 0; i < W * H; i++) if (Number.isNaN(terrain[i])) terrain[i] = fallback;
+    // Where hardly any bare ground shows (lush weeds or grass everywhere),
+    // the terrain filled in from far away can lie metres above the real
+    // ground (on a slope, in a hollow), and every tree there would look
+    // too low. The DSM itself shows the ground: its low surface with the
+    // trees taken off (morphological opening over 8 m). The terrain never
+    // lies above that (plus 0.3 m).
+    {
+      const lowCell = new Float32Array(W * H).fill(Infinity);
+      for (let cy = 0; cy < H; cy++) for (let cx = 0; cx < W; cx++) {
+        buf.length = 0;
+        for (let y = cy * step; y < Math.min(h, (cy + 1) * step); y++) {
+          for (let x = cx * step; x < Math.min(w, (cx + 1) * step); x++) {
+            const s = surface[y * w + x];
+            if (Number.isFinite(s)) buf.push(s);
+          }
+        }
+        if (buf.length >= 0.25 * step * step) { buf.sort((p, q) => p - q); lowCell[cy * W + cx] = buf[buf.length >> 2]; }
+      }
+      const R = Math.max(1, Math.round(8.0 / (step * pixel)));
+      const pass = (src, horizontal, take, none) => {
+        const out = new Float32Array(W * H);
+        const L = horizontal ? W : H, M = horizontal ? H : W;
+        for (let m = 0; m < M; m++) for (let l = 0; l < L; l++) {
+          let best = none;
+          for (let k = Math.max(0, l - R); k <= Math.min(L - 1, l + R); k++) {
+            const v = src[horizontal ? m * W + k : k * W + m];
+            if (Number.isFinite(v)) best = take(best, v);
+          }
+          out[horizontal ? m * W + l : l * W + m] = best;
+        }
+        return out;
+      };
+      const eroded = pass(pass(lowCell, true, Math.min, Infinity), false, Math.min, Infinity);
+      const opened = pass(pass(eroded, true, Math.max, -Infinity), false, Math.max, -Infinity);
+      for (let i = 0; i < W * H; i++) if (Number.isFinite(opened[i]) && Number.isFinite(lowCell[i]) && opened[i] + 0.3 < terrain[i]) terrain[i] = opened[i] + 0.3;
+    }
     const smooth = gauss(terrain, W, H, 1.0 / (step * pixel));
     const out = new Float32Array(w * h);
     for (let y = 0; y < h; y++) {
@@ -1042,7 +1078,7 @@
   // ways to do it; the choice for all rows together with the fewest extra
   // steps in the diagonals (then the fewest moved crowns) is found exactly
   // by dynamic programming over the rows (as in the notebook).
-  function alternateAlongRows(pos, alive, stepDir) {
+  function alternateAlongRows(pos, alive, stepDir, coordinate = true) {
     const shifted = pos.map((p) => (p ? p.slice() : null));
     const moved = new Uint8Array(pos.length);
     const rows = new Map();
@@ -1108,9 +1144,65 @@
       let pick = last.indexOf(Math.min(...last));
       const picked = new Array(rowIds.length);
       for (let k = rowIds.length - 1; k >= 0; k--) { picked[k] = pick; pick = back[k][pick]; }
+      // A moved run may move either way (one position left or right: both
+      // give it the other colour, so the colours stay exactly the same). It
+      // moves the way the crowns of the rows beside it moved, so the lines
+      // do not jog from row to row (iterated, each row against both of its
+      // neighbours, until nothing changes).
+      const current = rowIds.map((row, k) => choices[k][picked[k]]);
+      if (coordinate) {
+        const keyOf = (t, s, row) => (pos[t][0] + s) * stepDir[1] - row * stepDir[0];
+        const runsOf = rowIds.map((row) => {
+          const members = rows.get(row).slice().sort((p, q) => pos[p][0] - pos[q][0]);
+          const runs = [[members[0]]];
+          for (let k = 1; k < members.length; k++) {
+            if (pos[members[k]][0] - pos[members[k - 1]][0] > 1) runs.push([]);
+            runs[runs.length - 1].push(members[k]);
+          }
+          return runs;
+        });
+        const jogCost = (k, run, s) => {
+          let c = 0;
+          for (const kk of [k - 1, k + 1]) {
+            if (kk < 0 || kk >= rowIds.length || Math.abs(rowIds[kk] - rowIds[k]) !== 1) continue;
+            const nd = current[kk].diag;
+            for (const t of run) { const key = keyOf(t, s, rowIds[k]); if (nd.has(key)) c += Math.abs(nd.get(key) - s); }
+          }
+          return c;
+        };
+        for (let sweep = 0; sweep < 12; sweep++) {
+          let changed = 0;
+          for (let k = 0; k < rowIds.length; k++) {
+            const row = rowIds[k];
+            let bestOpt = null, bestCost = 0.01 * current[k].moved;
+            for (const run of runsOf[k]) bestCost += jogCost(k, run, current[k].shift.get(run[0]));
+            bestCost -= 1e-6;                                   // keep the current choice on a tie
+            for (const base of choices[k]) {
+              const shift = new Map();
+              let c = 0;
+              for (const run of runsOf[k]) {
+                const s0 = base.shift.get(run[0]);
+                if (!s0) { for (const t of run) shift.set(t, 0); c += jogCost(k, run, 0); continue; }
+                const cA = jogCost(k, run, s0), cB = jogCost(k, run, -s0);
+                const s = cB < cA ? -s0 : s0;
+                for (const t of run) shift.set(t, s);
+                c += Math.min(cA, cB);
+              }
+              c += 0.01 * base.moved;
+              if (c < bestCost - 1e-9) {
+                const diag = new Map();
+                for (const [t, s] of shift) diag.set(keyOf(t, s, row), s);
+                bestCost = c; bestOpt = { shift, diag, moved: base.moved };
+              }
+            }
+            if (bestOpt) { current[k] = bestOpt; changed++; }
+          }
+          if (!changed) break;
+        }
+      }
       rowIds.forEach((row, k) => {
-        for (const [t, s] of choices[k][picked[k]].shift) if (s) { shifted[t][0] += s; moved[t] = 1; }
-        if (k && rowIds[k] - rowIds[k - 1] === 1) extraSteps += between(choices[k - 1][picked[k - 1]], choices[k][picked[k]]);
+        for (const [t, s] of current[k].shift) if (s) { shifted[t][0] += s; moved[t] = 1; }
+        if (k && rowIds[k] - rowIds[k - 1] === 1) extraSteps += between(current[k - 1], current[k]);
       });
     }
     return { shifted, moved, extraSteps };
@@ -1280,6 +1372,7 @@
     for (let i = 0; i < n; i++) if (!valid[i]) mask[i] = 0;
     for (const k of FEATURES) F[k] = null;
     const rgbCanopyM2 = mask.reduce((s, v) => s + v, 0) * area;
+    if (opts.debug) opts.debug("rgbmask", mask);   // testing only
 
     // Elevation (DSM): only canopy that stands at least 1 m tall is a tree.
     let chm = null, elevation = { used: false, reason: "no elevation file" };
@@ -2507,7 +2600,7 @@
     const baseIndex = pos.map((p) => (p ? p[0] * stepDir[1] - p[1] * stepDir[0] : null));
     const alt = opts.alternateRows === false
       ? { shifted: pos, moved: new Uint8Array(total), extraSteps: 0 }
-      : alternateAlongRows(pos, aliveAll, stepDir);
+      : alternateAlongRows(pos, aliveAll, stepDir, opts.coordinateMoves !== false);
     const index = alt.shifted.map((p) => (p ? p[0] * stepDir[1] - p[1] * stepDir[0] : null));
     const keys = [...new Set(baseIndex.filter((k, t) => k !== null && aliveAll[t]))].sort((p, q) => p - q);
     const offset = (t) => pts[t][0] * normal[0] + pts[t][1] * normal[1];
@@ -2617,6 +2710,43 @@
       const end = Math.max(Math.max(...groups.map((g) => g.hi)), ks[ks.length - 1].v) + 1.5;
       const uk = ks.map((k) => k.u), vk = ks.map((k) => k.v);
       for (let q = 1; q < vk.length; q++) vk[q] = Math.max(vk[q], vk[q - 1] + 0.05);
+      // A line goes THROUGH each of its crowns, not necessarily through the
+      // middle: each knot may slide along the row inside the middle part of
+      // its own crown (in a row without a tree of this line: inside the open
+      // gap there), and the knots are then drawn as straight along the
+      // diagonal as those bands allow (iterated smoothing, kept in the band).
+      if (opts.straightLines !== false && vk.length >= 2) {
+        const otherFam = (l) => l > 0 && diagOfLabel[l] !== 0 && Math.abs(diagOfLabel[l]) % 2 !== Math.abs(number) % 2;
+        const chord = (u0, v0, inside) => {
+          let lo = u0, hi = u0;
+          for (let s = pixel / 2; s <= inRow; s += pixel / 2) { const [x, y] = toXY(u0 - s, v0); if (!inside(labelAt(x, y))) break; lo = u0 - s; }
+          for (let s = pixel / 2; s <= inRow; s += pixel / 2) { const [x, y] = toXY(u0 + s, v0); if (!inside(labelAt(x, y))) break; hi = u0 + s; }
+          return [lo, hi];
+        };
+        const bandLo = [], bandHi = [];
+        ks.forEach((k, q) => {
+          let lo, hi;
+          if (k.members) {
+            const own = new Set(k.members.map((t) => t + 1));
+            [lo, hi] = chord(uk[q], vk[q], (l) => own.has(l));
+            const cut = (opts.bandCut ?? 0.2) * (hi - lo);
+            lo = Math.min(uk[q], lo + cut); hi = Math.max(uk[q], hi - cut);
+          } else {
+            [lo, hi] = chord(uk[q], vk[q], (l) => !otherFam(l));
+            const cut = 0.2 * (hi - lo);
+            lo = Math.max(uk[q] - 0.5 * inRow, Math.min(uk[q], lo + cut)); hi = Math.min(uk[q] + 0.5 * inRow, Math.max(uk[q], hi - cut));
+          }
+          bandLo.push(lo - slope * vk[q]); bandHi.push(hi - slope * vk[q]);
+        });
+        const sig = (opts.straightSigma ?? 1.0) * rowSpacing, nk0 = vk.length;
+        let r = vk.map((v, q) => uk[q] - slope * v);
+        const nbr = vk.map((v) => { const list = []; for (let j = 0; j < nk0; j++) { const dv = vk[j] - v; if (Math.abs(dv) <= 3 * sig) list.push([j, Math.exp(-0.5 * (dv / sig) ** 2)]); } return list; });
+        for (let it = 0; it < (opts.straightIters ?? 120); it++) {
+          const nr = r.map((_, q) => { let s = 0, ws = 0; for (const [j, wj] of nbr[q]) { s += wj * r[j]; ws += wj; } return s / ws; });
+          r = nr.map((x, q) => Math.min(bandHi[q], Math.max(bandLo[q], x)));
+        }
+        for (let q = 0; q < nk0; q++) uk[q] = r[q] + slope * vk[q];
+      }
       // Past its first and last crown the line runs on in the direction of
       // the diagonal itself (after a smooth bend inside the crown), so it
       // ends, and its arrow points, along the diagonal.
@@ -2765,6 +2895,7 @@
       }
       uvLines.set(number, uv);
     }
+    if (opts.debugLines) opts.debugLines("raw", [...uvLines].map(([nb, uv]) => [nb, uv.map(([u, v]) => toXY(u, v))]));   // testing only
 
     // Lines never cross: at every point across the rows the lines keep the
     // order of their numbers, at least 0.3 tree spacings apart. Where two
