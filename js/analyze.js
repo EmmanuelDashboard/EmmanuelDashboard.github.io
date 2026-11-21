@@ -2573,16 +2573,28 @@
 
     // Crown boxes and areas (after merges and splits).
     const area2 = new Float64Array(total + 1), box = Array.from({ length: total + 1 }, () => [Infinity, Infinity, -Infinity, -Infinity]);
+    const sumCX = new Float64Array(total + 1), sumCY = new Float64Array(total + 1);
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       const l = labels[y * w + x];
       if (!l) continue;
-      area2[l]++;
+      area2[l]++; sumCX[l] += x; sumCY[l] += y;
       const bb = box[l];
       if (x < bb[0]) bb[0] = x; if (y < bb[1]) bb[1] = y; if (x > bb[2]) bb[2] = x; if (y > bb[3]) bb[3] = y;
     }
     // Crowns below 2 m² are not shown, so they take no part in the colours
     // (young trees on their planting position excepted).
     for (let t = 0; t < total; t++) if (area2[t + 1] * area < 2.0 && !young[t]) aliveAll[t] = 0;
+    // The middle of each crown (centre of its outline): the diagonal lines
+    // run through it. Where the centre falls outside the crown (a bent
+    // shape), the treetop is used.
+    const mids = knots.map((k, t) => {
+      const l = t + 1;
+      if (!area2[l]) return k;
+      const cx = sumCX[l] / area2[l], cy = sumCY[l] / area2[l];
+      const ci = Math.round(cx), ri = Math.round(cy);
+      if (ci < 0 || ri < 0 || ci >= w || ri >= h || labels[ri * w + ci] !== l) return k;
+      return [(cx + 0.5) * pixel, (h - cy - 0.5) * pixel];
+    });
 
     // ---------------- diagonals
     await step("Drawing the EVEN / ODD diagonals …");
@@ -2645,7 +2657,7 @@
     });
 
     const extent = (t) => {
-      const u = U(knots[t]), v = V(knots[t]);
+      const u = U(mids[t]), v = V(mids[t]);
       let lo = v, hi = v;
       for (let s = pixel / 2; s < 2 * rowSpacing; s += pixel / 2) { const [x, y] = toXY(u, v - s); if (labelAt(x, y) !== t + 1) break; lo = v - s; }
       for (let s = pixel / 2; s < 2 * rowSpacing; s += pixel / 2) { const [x, y] = toXY(u, v + s); if (labelAt(x, y) !== t + 1) break; hi = v + s; }
@@ -2671,15 +2683,15 @@
 
     function wavy(number, members, ext, crossing, separate) {
       const groups = [];
-      for (const t of members.slice().sort((p, q) => V(knots[p]) - V(knots[q]))) {
+      for (const t of members.slice().sort((p, q) => V(mids[p]) - V(mids[q]))) {
         const [lo, hi] = ext.get(t);
         const last = groups[groups.length - 1];
-        if (last && !separate.has(t) && !last.members.some((m) => separate.has(m)) && lo <= last.hi && Math.abs(V(knots[t]) - last.v) < 0.3 * rowSpacing) {
+        if (last && !separate.has(t) && !last.members.some((m) => separate.has(m)) && lo <= last.hi && Math.abs(V(mids[t]) - last.v) < 0.3 * rowSpacing) {
           last.members.push(t);
-          last.u = last.members.reduce((s, m) => s + U(knots[m]), 0) / last.members.length;
-          last.v = last.members.reduce((s, m) => s + V(knots[m]), 0) / last.members.length;
+          last.u = last.members.reduce((s, m) => s + U(mids[m]), 0) / last.members.length;
+          last.v = last.members.reduce((s, m) => s + V(mids[m]), 0) / last.members.length;
           last.lo = Math.min(last.lo, lo); last.hi = Math.max(last.hi, hi);
-        } else groups.push({ members: [t], u: U(knots[t]), v: V(knots[t]), lo, hi });
+        } else groups.push({ members: [t], u: U(mids[t]), v: V(mids[t]), lo, hi });
       }
       let ks = [groups[0]];
       for (const g of groups.slice(1)) {
@@ -2710,11 +2722,11 @@
       const end = Math.max(Math.max(...groups.map((g) => g.hi)), ks[ks.length - 1].v) + 1.5;
       const uk = ks.map((k) => k.u), vk = ks.map((k) => k.v);
       for (let q = 1; q < vk.length; q++) vk[q] = Math.max(vk[q], vk[q - 1] + 0.05);
-      // A line goes THROUGH each of its crowns, not necessarily through the
-      // middle: each knot may slide along the row inside the middle part of
-      // its own crown (in a row without a tree of this line: inside the open
-      // gap there), and the knots are then drawn as straight along the
-      // diagonal as those bands allow (iterated smoothing, kept in the band).
+      // A line goes through the middle of each of its crowns: each knot may
+      // slide along the row only a little around the crown's centre (in a
+      // row without a tree of this line: inside the open gap there), and the
+      // knots are then drawn as straight along the diagonal as those bands
+      // allow (iterated smoothing, kept in the band).
       if (opts.straightLines !== false && vk.length >= 2) {
         const otherFam = (l) => l > 0 && diagOfLabel[l] !== 0 && Math.abs(diagOfLabel[l]) % 2 !== Math.abs(number) % 2;
         const chord = (u0, v0, inside) => {
@@ -2728,9 +2740,11 @@
           let lo, hi;
           if (k.members) {
             const own = new Set(k.members.map((t) => t + 1));
+            // through the middle of the crown: at most 0.6 m (or 15 % of the
+            // crown's width) from its centre
             [lo, hi] = chord(uk[q], vk[q], (l) => own.has(l));
-            const cut = (opts.bandCut ?? 0.2) * (hi - lo);
-            lo = Math.min(uk[q], lo + cut); hi = Math.max(uk[q], hi - cut);
+            const half = Math.min(opts.centreBand ?? 0.6, 0.15 * (hi - lo));
+            lo = uk[q] - half; hi = uk[q] + half;
           } else {
             [lo, hi] = chord(uk[q], vk[q], (l) => !otherFam(l));
             const cut = 0.2 * (hi - lo);
@@ -3114,9 +3128,9 @@
       let i0 = 0, i1 = pts2.length - 1;
       while (i0 <= i1 && !validAt(pts2[i0][0], pts2[i0][1])) i0++;
       while (i1 >= i0 && !validAt(pts2[i1][0], pts2[i1][1])) i1--;
-      // Past its first and last own crown, a line runs on to the field
-      // edge only as long as the way is clear: it stops before a crown of
-      // the other colour (never over it).
+      // Past its first and last own crown, a line runs on to the field edge
+      // (it never starts or ends in the middle of the field). Only with
+      // opts.trimTails it stops before a crown of the other colour instead.
       const kind = (p) => {
         const l = labelAt(p[0], p[1]);
         if (!(l > 0) || diagOfLabel[l] === 0) return 0;
@@ -3126,7 +3140,7 @@
       while (f0 <= i1 && kind(pts2[f0]) !== 1) f0++;
       let f1 = i1;
       while (f1 >= i0 && kind(pts2[f1]) !== 1) f1--;
-      if (f0 <= f1) {
+      if (opts.trimTails && f0 <= f1) {
         for (let j = f0 - 1; j >= i0; j--) if (kind(pts2[j]) === -1) { i0 = Math.min(f0, j + 3); break; }
         for (let j = f1 + 1; j <= i1; j++) if (kind(pts2[j]) === -1) { i1 = Math.max(f1, j - 3); break; }
       }
