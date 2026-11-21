@@ -1545,7 +1545,7 @@
     // height rules dropped, standing on an EMPTY planting position of a row,
     // is a young tree. It becomes a crown (flag YOUNG_TREE), so it is counted
     // and takes its place in the EVEN / ODD alternation.
-    let gridSearch = null, fineSearch = null, rowWalk = null;
+    let gridSearch = null, fineSearch = null, rowWalk = null, darkSearch = null, darkWalk = null;
     if (small) {
       await step("Young trees on empty planting positions …");
       const I = inv2(a, b);
@@ -2001,6 +2001,134 @@
         }
       }
 
+      // Dark young trees: in green weeds a young pecan is no greener than
+      // the weeds, but it is a dark, round, compact bush (its own shade and
+      // shadow) standing alone on the strip. Looked for at every empty
+      // planting position; the 40 × 20 ft spacing is the check: counted
+      // only when such bushes stand on the planting positions far more
+      // often than halfway between them (weeds and grass lie anywhere).
+      let findDark = null;
+      if (gridOk) {
+        await step("Young trees: dark young crowns on the planting positions …");
+        const occ2 = new Set(occupied);
+        for (const e of extra) if (e.pos) occ2.add(siteOf(e.pos));
+        const rD = (opts.darkRadius || 0.45) * inRow;   // search radius for dark crowns (checked halfway between with the same radius)
+        findDark = (sx, sy) => {
+          const cc = Math.floor(sx / pixel), rr = h - 1 - Math.floor(sy / pixel);
+          if (cc < R || rr < R || cc >= w - R || rr >= h - R) return null;
+          if (!valid[rr * w + cc] || toEdge[rr * w + cc] * pixel < 2.0) return null;
+          const gYs = [];
+          let ann = 0;
+          for (let y = rr - R; y <= rr + R; y++) for (let x = cc - R; x <= cc + R; x++) {
+            const d = Math.hypot(x - cc, y - rr) * pixel;
+            if (d <= rD || d > rOut) continue;
+            ann++;
+            const k = y * w + x;
+            if (free(k)) gYs.push(lumaAt(k));
+          }
+          if (gYs.length < 0.4 * ann) return null;
+          const gY = percentile(gYs, 50);
+          if (gY < thresholds.darkY) return null;
+          const isD = (k) => free(k) && lumaAt(k) < 0.7 * gY && exgAt(k) >= 0.03;
+          compOf.fill(0);
+          let id2 = 0, pick = null;
+          for (let y = rr - R; y <= rr + R; y++) for (let x = cc - R; x <= cc + R; x++) {
+            const k0 = (y - rr + R) * bw + (x - cc + R);
+            if (compOf[k0] || Math.hypot(x - cc, y - rr) * pixel > rD || !isD(y * w + x)) continue;
+            compOf[k0] = ++id2;
+            const list = [], stack = [y * w + x];
+            let leak = 0;
+            while (stack.length) {
+              const u = stack.pop(), ux = u % w, uy = (u / w) | 0;
+              list.push(u);
+              for (const [vx, vy] of [[ux - 1, uy], [ux + 1, uy], [ux, uy - 1], [ux, uy + 1]]) {
+                if (vx < cc - R || vx > cc + R || vy < rr - R || vy > rr + R) { leak++; continue; }
+                const kk = (vy - rr + R) * bw + (vx - cc + R), v = vy * w + vx;
+                if (compOf[kk] || !isD(v)) continue;
+                if (Math.hypot(vx - cc, vy - rr) * pixel > rD + 0.6) { leak++; continue; }
+                compOf[kk] = id2;
+                stack.push(v);
+              }
+            }
+            const A = list.length * area;
+            if (A < 0.25 || A > 3.0) continue;                                   // bush-sized
+            let mx2 = 0, my2 = 0, lum = 0, eg = 0, clear = Infinity;
+            for (const u of list) { mx2 += u % w; my2 += (u / w) | 0; lum += lumaAt(u); eg += exgAt(u); if (toCrown[u] < clear) clear = toCrown[u]; }
+            mx2 /= list.length; my2 /= list.length; lum /= list.length; eg /= list.length;
+            if (clear * pixel < 2.0) continue;                                    // well away from big trees and their shadows
+            if (lum > 0.6 * gY || eg < 0.04) continue;                            // clearly dark, green (not mud)
+            {
+              // its dark area (any colour) stays small and never reaches a big
+              // tree: otherwise it is a piece of that tree's cast shadow
+              const seenD = new Set(list), stD = list.slice();
+              let partOfShadow = false;
+              while (stD.length && !partOfShadow) {
+                const u = stD.pop(), ux = u % w, uy = (u / w) | 0;
+                for (const [vx, vy] of [[ux - 1, uy], [ux + 1, uy], [ux, uy - 1], [ux, uy + 1]]) {
+                  if (vx < 0 || vy < 0 || vx >= w || vy >= h) continue;
+                  const v = vy * w + vx;
+                  if (seenD.has(v) || !valid[v]) continue;
+                  if (labels[v]) { partOfShadow = true; break; }
+                  if (lumaAt(v) >= 0.7 * gY) continue;
+                  seenD.add(v);
+                  if (seenD.size * area > 4.0) { partOfShadow = true; break; }
+                  stD.push(v);
+                }
+              }
+              if (partOfShadow) continue;
+            }
+            let reach2 = 0, edge2 = 0, touch2 = 0;
+            const inList = new Set(list);
+            for (const u of list) {
+              const ux = u % w, uy = (u / w) | 0;
+              reach2 = Math.max(reach2, (ux - mx2) ** 2 + (uy - my2) ** 2);
+              for (const v of [u - 1, u + 1, u - w, u + w]) { if (inList.has(v)) continue; edge2++; if (labels[v]) touch2++; }
+            }
+            if (Math.sqrt(reach2) * pixel > 1.0) continue;                       // compact
+            if (list.length / (Math.PI * Math.max(reach2, 1)) < 0.35) continue;   // round
+            if (touch2 > 0.1 * edge2 || leak > 0.15 * edge2) continue;            // standing alone
+            const ring = ringGreens(list, 0.5);
+            if (!ring.length || ring.luma.filter((v) => v < 0.7 * gY).length > 0.25 * ring.length) continue; // not a dark patch in tall grass
+            const spot = [(mx2 + 0.5) * pixel, (h - my2 - 0.5) * pixel];
+            if (!pick || A > pick.A) pick = { list, spot, A };
+          }
+          return { pick, near: !!pick && Math.hypot(pick.spot[0] - sx, pick.spot[1] - sy) <= rD };
+        };
+        const foundD = [], chk = { on: 0, onFound: 0, between: 0, betweenFound: 0 };
+        for (const [q, [lo, hi]] of searchRows) {
+          for (let p = lo - 1; p <= hi + 1; p++) {
+            if (occ2.has(p + "," + q)) continue;
+            const s = spotAt(p, q);
+            const r = s && findDark(s[0], s[1]);
+            if (!r) continue;
+            chk.on++;
+            if (r.near) { chk.onFound++; foundD.push({ pos: [p, q], pick: r.pick }); }
+            if (opts.debugYoung && r.pick) opts.debugYoung("don", s, r.pick.spot, r.pick.A, r.near);
+          }
+          for (let p = lo - 1; p <= hi; p++) {
+            if (!(occ2.has(p + "," + q) && occ2.has((p + 1) + "," + q))) continue;   // between two trees
+            const s = spotAt(p + 0.5, q);
+            const r = s && findDark(s[0], s[1]);
+            if (!r) continue;
+            chk.between++;
+            if (r.near) chk.betweenFound++;
+            if (opts.debugYoung && r.pick) opts.debugYoung("dbetween", s, r.pick.spot, r.pick.A, r.near);
+          }
+        }
+        const rOn = chk.onFound / Math.max(1, chk.on), rBe = chk.betweenFound / Math.max(1, chk.between);
+        darkSearch = { ...chk, counted: chk.between >= 10 && chk.onFound >= 3 && rBe <= 0.25 * rOn, added: 0 };
+        if (darkSearch.counted) {
+          for (const f of foundD) {
+            if (f.pick.list.some((u) => labels[u]) || occ2.has(siteOf(f.pos))) continue;
+            const id = count + extra.length + 1;
+            for (const u of f.pick.list) { labels[u] = id; mask[u] = 1; }
+            extra.push({ pos: f.pos, spot: f.pick.spot, size: f.pick.list.length, young: true });
+            occ2.add(siteOf(f.pos));
+            darkSearch.added++;
+          }
+        }
+      }
+
       // Full-resolution look. A young crown is only a few pixels on the
       // analysis grid, so at every planting position still empty the
       // original image (about 5 cm) is read around the spot, and a young
@@ -2300,6 +2428,41 @@
             rowWalk.added++;
             const lst = cands.find((c) => c.pk === pk).list;
             lst.push({ u: pu, v: Vf(pk.spot), pos: ps, pt: pk.spot });
+          }
+        }
+
+        // The same walk for dark young crowns (young pecans in weeds that
+        // stand a little off the exact spacing), with the same alley check.
+        if (findDark) {
+          for (const e of extra) if (e.young && e.pos) {
+            const lst = rows2.get(e.pos[1]);
+            if (lst && !lst.some((o) => Math.abs(o.u - Uf(e.spot)) < 0.1)) lst.push({ u: Uf(e.spot), v: Vf(e.spot), pos: e.pos, pt: e.spot });
+          }
+          const cands3 = [];
+          darkWalk = { onRows: 0, inAlleys: 0, counted: false, added: 0 };
+          for (const list of rows2.values()) {
+            if (list.length < 2) continue;
+            list.sort((p1, p2) => p1.u - p2.u);
+            darkWalk.onRows += walk(list, 0, cands3, findDark, 0.25);
+            darkWalk.inAlleys += walk(list, 0.5 * rowSp, null, findDark, 0.25);
+          }
+          darkWalk.counted = darkWalk.onRows >= 3 && darkWalk.inAlleys <= 0.15 * darkWalk.onRows + 1;
+          for (const { pk, nearOwn } of darkWalk.counted ? cands3 : []) {
+            if (pk.list.some((u2) => labels[u2])) continue;
+            const pu = Uf(pk.spot);
+            let ps = null;
+            const o = nearOwn(pu, 1)[0];
+            if (o && o.pos) {
+              const ex = pk.spot[0] - o.pt[0], ey = pk.spot[1] - o.pt[1];
+              const uu = o.pos[0] + I[0][0] * ex + I[0][1] * ey, vv = o.pos[1] + I[1][0] * ex + I[1][1] * ey;
+              const pp = Math.round(uu), qq = Math.round(vv);
+              if (Math.abs(uu - pp) <= 0.35 && Math.abs(vv - qq) <= 0.3 && !occ.has(pp + "," + qq)) ps = [pp, qq];
+            }
+            if (ps) occ.add(siteOf(ps));
+            const id = count + extra.length + 1;
+            for (const u2 of pk.list) { labels[u2] = id; mask[u2] = 1; }
+            extra.push({ pos: ps, spot: pk.spot, size: pk.list.length, young: true });
+            darkWalk.added++;
           }
         }
       }
@@ -2916,6 +3079,8 @@
           counted: gridSearch.counted, young_trees_added: gridSearch.added,
         },
         young_row_walk: rowWalk,
+        young_dark_search: darkSearch,
+        young_dark_walk: darkWalk,
         young_full_resolution: fineSearch && {
           positions_searched: fineSearch.on, found_on_positions: fineSearch.onFound,
           between_searched: fineSearch.between, found_between: fineSearch.betweenFound, offset_row_trees: fineSearch.runs,
