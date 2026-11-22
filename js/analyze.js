@@ -1879,6 +1879,7 @@
         const ang = (bestAng * Math.PI) / 180;
         return [Math.cos(ang), -Math.sin(ang)];
       })();
+      if (opts.debugFine) opts.debugFine("shadowDir", shadowDir, null, 0, false, null);   // testing only
       // A young tree stands up: right beside it, on the side shadows fall,
       // lies its own compact shadow (not part of a big tree's shadow).
       const ownShadow = (inList, mx2, my2, bgYmed) => {
@@ -1971,11 +1972,12 @@
               }
             }
             const A = list.length * area;
-            if (A < Math.max(L.minArea, 2 * area) || A > maxArea) continue; // sapling-sized
+            const why = opts.debugWhy && A >= 0.15 ? (reason) => opts.debugWhy(cc, rr, reason, A, list) : () => {};   // testing only
+            if (A < Math.max(L.minArea, 2 * area) || A > maxArea) { why("size"); continue; } // sapling-sized
             const g = list.map(exgAt);
             const gmax = Math.max(...g);
-            if (gmax - bg50 < L.contrast) continue;                        // much greener than the ground
-            if (percentile(g, 75) < L.green * leafGreen) continue;         // as green as pecan leaves
+            if (gmax - bg50 < L.contrast) { why("contrast"); continue; }   // much greener than the ground
+            if (percentile(g, 75) < L.green * leafGreen) { why("green"); continue; } // as green as pecan leaves
             let mx2 = 0, my2 = 0;
             for (const u of list) { mx2 += u % w; my2 += (u / w) | 0; }
             mx2 /= list.length; my2 /= list.length;
@@ -1990,24 +1992,25 @@
                 if (labels[v]) touch2++;
               }
             }
-            if (Math.sqrt(reach2) * pixel > 0.45 * inRow) continue;       // compact, not a strip
-            if (list.length / (Math.PI * Math.max(reach2, 1)) < (hop.length > 4 ? 0.15 : L.round)) continue; // (leaves with soil between: less filled)
-            if (touch2 > 0.15 * edge2) continue;                          // not the edge of a big crown
+            if (Math.sqrt(reach2) * pixel > 0.45 * inRow) { why("strip"); continue; } // compact, not a strip
+            if (list.length / (Math.PI * Math.max(reach2, 1)) < (hop.length > 4 ? 0.15 : L.round)) { why("round"); continue; } // (leaves with soil between: less filled)
+            if (touch2 > 0.15 * edge2) { why("touch"); continue; }        // not the edge of a big crown
             let gapC = Infinity, lum = 0;
             for (const u of list) { if (toCrown[u] < gapC) gapC = toCrown[u]; lum += lumaAt(u); }
-            if (gapC * pixel < 0.4) continue;                             // stands apart from the big crowns
+            if (gapC * pixel < 0.4) { why("nearcrown"); continue; }       // stands apart from the big crowns
             lum /= list.length;
-            if (lum < thresholds.darkY || lum < 0.7 * bgYmed) continue;   // sunlit, not leaves in a shadow
-            if (leak > (L.leak * edge2 * hop.length) / 4) continue;       // not part of a band of grass
+            if (lum < thresholds.darkY || lum < 0.7 * bgYmed) { why("dark " + Math.round(lum) + "/" + Math.round(bgYmed) + "/" + Math.round(thresholds.darkY)); continue; } // sunlit, not leaves in a shadow
+            if (leak > (L.leak * edge2 * hop.length) / 4) { why("leak"); continue; } // not part of a band of grass
             const ring = ringGreens(list, 0.6);
-            if (!ring.length) continue;
+            if (!ring.length) { why("noring"); continue; }
             // on mostly bare ground: a greener patch with grass all round is grass
             const own50 = percentile(g, 50);
-            if (ring.filter((v) => v >= 0.6 * own50).length > 0.5 * ring.length) continue;
+            if (ring.filter((v) => v >= 0.6 * own50).length > 0.5 * ring.length) { why("grassring"); continue; }
             const own25 = percentile(g, 25);
             const asGreen = ring.filter((v) => v >= own25).length / ring.length;
-            if (asGreen > L.asGreen) continue;                            // an island of leaves
-            if (L.needShadow && !ownShadow(inList, mx2, my2, bgYmed)) continue; // it stands: its own shadow
+            if (asGreen > L.asGreen) { why("asgreen " + asGreen.toFixed(2)); continue; } // an island of leaves
+            if (L.needShadow && !ownShadow(inList, mx2, my2, bgYmed)) { why("noshadow"); continue; } // it stands: its own shadow
+            why("OK");
             const score = gmax - bg50;
             if (!pick || score > pick.score) pick = { list, score, spot: [(mx2 + 0.5) * pixel, (h - my2 - 0.5) * pixel] };
           }
@@ -2290,7 +2293,7 @@
           const thr = Math.max(Math.min(percentile(bg, 75) + 0.05, bg50 + 0.12), 0.5 * leafGreen);
           const leaf = (k) => free2[k] && exS[k] >= thr;
           const comp = new Int32Array(nf);
-          let idc = 0, pick = null;
+          let idc = 0, pick = null, pickB = null;
           const ringR = Math.max(1, Math.round(0.4 / pf));
           for (let k0 = 0; k0 < nf; k0++) {
             if (comp[k0] || !leaf(k0) || dist(k0) > rIn) continue;
@@ -2310,7 +2313,8 @@
               }
             }
             const A = list.length * pf * pf;
-            if (A < (opts.fineMinArea || 0.3) || A > maxArea) continue;         // young-crown sized (smaller: like a weed)
+            if (A < 0.15 || A > maxArea) continue;                              // young-crown sized
+            const small = A < (opts.fineMinArea || 0.3);                        // (smaller: like a weed, unless it has a stem)
             const g = list.map((u) => exS[u]);
             const gmax = Math.max(...g);
             if (gmax - bg50 < 0.12) continue;                                   // much greener than the ground
@@ -2337,7 +2341,7 @@
             if (list.length / (Math.PI * Math.max(reach2, 1)) < 0.2) continue;
             if (touch > 0.15 * edge || leak > 0.15 * edge) continue;            // not a crown edge, not a band of grass
             // an island of leaves: little leaf-green ground within 0.4 m
-            let ring = 0, ringGreen = 0;
+            let ring = 0, ringGreen = 0, ringSoil = 0;
             for (let yy = Math.max(0, by0 - ringR); yy <= Math.min(fh - 1, by1 + ringR); yy++) {
               for (let xx = Math.max(0, bx0 - ringR); xx <= Math.min(fw - 1, bx1 + ringR); xx++) {
                 const v = yy * fw + xx;
@@ -2347,12 +2351,18 @@
                 if (!near2) continue;
                 ring++;
                 if (exS[v] >= thr) ringGreen++;
+                if (ex[v] < 0.05) ringSoil++;                                 // bare soil (sunlit or in its shadow), not green
               }
             }
             if (!ring || ringGreen > 0.2 * ring) continue;
+            // On clean bare soil (a weeded tree strip): a lone green crown
+            // there is a young tree (checked below against the positions in
+            // between, separately from the rule with the shadow).
+            const bare = ringSoil >= 0.6 * ring && list.length / (Math.PI * Math.max(reach2, 1)) >= 0.3;
+            if (opts.debugFine) opts.debugFine("ring", [list.reduce((s, u) => s + mx[u], 0) / list.length, list.reduce((s, u) => s + my[u], 0) / list.length], null, A, bare, { soil: ringSoil / ring, round: list.length / (Math.PI * Math.max(reach2, 1)), green: ringGreen / ring });   // testing only
             // It stands up: its own compact shadow lies right beside it, on
             // the side the big trees' shadows fall (weeds and grass lie flat).
-            {
+            const stands = (() => {
               const sdx = shadowDir[0], sdy = shadowDir[1];
               const rad = Math.sqrt(list.length / Math.PI), reachS = rad + 1.2 / pf;
               const isDark = (v) => free2[v] && !inL.has(v) && lu[v] < 0.55 * bgYmed;
@@ -2366,7 +2376,7 @@
                   if (isDark(v)) seeds.push(v);
                 }
               }
-              if (!seeds.length) continue;
+              if (!seeds.length) return false;
               const seen = new Set(seeds), st = seeds.slice();
               let bad = false;
               while (st.length && !bad) {
@@ -2382,36 +2392,45 @@
               // a real tree shadow: dark, about the size of the crown (0.5 to
               // 2.5 times), and right next to it (measured on young pecans)
               const As = seen.size * pf * pf;
-              if (bad || As < 0.5 * A || As > 2.5 * A || As > 12) continue;
-              if (percentile([...seen].map((v) => lu[v]), 50) > 0.45 * bgYmed) continue;
-              const along = [...seen].reduce((s, v) => s + ((v % fw) - cx) * sdx + (((v / fw) | 0) - cy) * sdy, 0) / seen.size / Math.max(rad, 1);
-              if (along > 4) continue;
-            }
+              if (bad) return false;
+              const crownShadow = As >= 0.5 * A && As <= 2.5 * A && As <= 12 &&
+                percentile([...seen].map((v) => lu[v]), 50) <= 0.45 * bgYmed &&
+                [...seen].reduce((s, v) => s + ((v % fw) - cx) * sdx + (((v / fw) | 0) - cy) * sdy, 0) / seen.size / Math.max(rad, 1) <= 4;
+              return crownShadow && !small;
+            })();
+            if (!stands && !bare) continue;
             const spot = [list.reduce((s, u) => s + mx[u], 0) / list.length, list.reduce((s, u) => s + my[u], 0) / list.length];
             const score = A * (gmax - bg50);
-            if (!pick || score > pick.score) pick = { score, spot, cells: list.map((u) => gIdx[u]), A };
+            const cand = { score, spot, cells: list.map((u) => gIdx[u]), A };
+            if (stands && (!pick || score > pick.score)) pick = cand;
+            if (bare && (!pickB || score > pickB.score)) pickB = cand;
           }
-          return { pick, near: !!pick && Math.hypot(pick.spot[0] - sx, pick.spot[1] - sy) <= rIn };
+          const nearOf = (pk) => !!pk && Math.hypot(pk.spot[0] - sx, pk.spot[1] - sy) <= rIn;
+          return { pick, near: nearOf(pick), pickB, nearB: nearOf(pickB) };
         };
-        const found2 = [], picks2 = new Map();
+        const found2 = [], picks2 = new Map(), found3 = [], picks3 = new Map();
         const check2 = { on: 0, onFound: 0, between: 0, betweenFound: 0 };
+        const check3 = { on: 0, onFound: 0, between: 0, betweenFound: 0 };
         for (const [q, [lo, hi]] of searchRows) {
           for (let p = lo - 1; p <= hi + 1; p++) {
             if (done.has(p + "," + q)) continue;
             const s = spotAt(p, q);
             const r = s && await look(s[0], s[1]);
             if (!r) continue;
-            check2.on++;
+            check2.on++; check3.on++;
             if (r.near) check2.onFound++;
+            if (r.nearB) check3.onFound++;
             if (r.pick) found2.push({ pos: [p, q], pick: r.pick });
+            if (r.pickB) found3.push({ pos: [p, q], pick: r.pickB });
           }
           for (let p = lo - 1; p <= hi; p++) {
             if (betweenPicks.has(p + "," + q)) continue;     // green already found there by the search above
             const s = spotAt(p + 0.5, q);
             const r = s && await look(s[0], s[1]);
             if (!r) continue;
-            check2.between++;
+            check2.between++; check3.between++;
             if (r.near) picks2.set(p + "," + q, { p, q, pick: r.pick });
+            if (r.nearB) picks3.set(p + "," + q, { p, q, pick: r.pickB });
           }
         }
         const inRun2 = (b2) => picks2.has((b2.p - 1) + "," + b2.q) || picks2.has((b2.p + 1) + "," + b2.q);
@@ -2419,7 +2438,13 @@
         check2.betweenFound = picks2.size - runs2.length;
         const rate2On = check2.onFound / Math.max(1, check2.on), rate2Between = check2.betweenFound / Math.max(1, check2.between);
         fineSearch = { ...check2, runs: runs2.length, counted: check2.between >= 20 && check2.onFound >= 3 && rate2Between <= 0.25 * rate2On, added: 0 };
-        if (fineSearch.counted) {
+        // the lone green crowns on clean bare soil: their own check
+        const inRun3 = (b3) => picks3.has((b3.p - 1) + "," + b3.q) || picks3.has((b3.p + 1) + "," + b3.q);
+        const runs3 = [...picks3.values()].filter(inRun3);
+        check3.betweenFound = picks3.size - runs3.length;
+        const rate3On = check3.onFound / Math.max(1, check3.on), rate3Between = check3.betweenFound / Math.max(1, check3.between);
+        fineSearch.bare_soil = { found_on_positions: check3.onFound, found_between: check3.betweenFound, counted: check3.between >= 20 && check3.onFound >= 3 && rate3Between <= 0.25 * rate3On, added: 0 };
+        {
           const commit2 = (pos2, pick) => {
             if (done.has(siteOf(pos2))) return;
             const cover = new Map();
@@ -2435,11 +2460,21 @@
             extra.push({ pos: pos2, spot: pick.spot, size: cells.length, young: true });
             done.add(siteOf(pos2));
             fineSearch.added++;
+            return true;
           };
-          for (const f of found2) commit2(f.pos, f.pick);
-          for (const b2 of runs2.sort((x, y) => x.q - y.q || x.p - y.p)) {
-            const p2 = [b2.p, b2.p + 1].find((pp) => !done.has(pp + "," + b2.q));
-            if (p2 !== undefined) commit2([p2, b2.q], b2.pick);
+          if (fineSearch.counted) {
+            for (const f of found2) commit2(f.pos, f.pick);
+            for (const b2 of runs2.sort((x, y) => x.q - y.q || x.p - y.p)) {
+              const p2 = [b2.p, b2.p + 1].find((pp) => !done.has(pp + "," + b2.q));
+              if (p2 !== undefined) commit2([p2, b2.q], b2.pick);
+            }
+          }
+          if (fineSearch.bare_soil.counted) {
+            for (const f of found3) if (commit2(f.pos, f.pick)) fineSearch.bare_soil.added++;
+            for (const b3 of runs3.sort((x, y) => x.q - y.q || x.p - y.p)) {
+              const p3 = [b3.p, b3.p + 1].find((pp) => !done.has(pp + "," + b3.q));
+              if (p3 !== undefined && commit2([p3, b3.q], b3.pick)) fineSearch.bare_soil.added++;
+            }
           }
         }
       }
@@ -2650,6 +2685,7 @@
     for (let t = 0; t < total; t++) if (aliveAll[t]) diagOfLabel[t + 1] = diagonal[t];
     // How deep (pixels) a point lies inside the canopy of each colour: a
     // line crossing the other colour keeps to the crown edges.
+    const edgeTol = opts.edgeTolerance ?? 0.25;
     const depthIn = [0, 1].map((f) => {
       const m2 = new Uint8Array(n);
       for (let i = 0; i < n; i++) { const l = labels[i]; m2[i] = l > 0 && diagOfLabel[l] !== 0 && Math.abs(diagOfLabel[l]) % 2 === f ? 1 : 0; }
@@ -2801,7 +2837,7 @@
       line.push([uk[0], vk[0]]);
       for (let q = 0; q < nk - 1; q++) {
         const cq = curve(q);
-        const seg = route(number, uk[q], vk[q], uk[q + 1], vk[q + 1], cq);
+        const seg = opts.avoidOther === false ? null : route(number, uk[q], vk[q], uk[q + 1], vk[q + 1], cq);
         if (seg) { line.push(...seg); continue; }
         const v0 = vk[q], v1 = vk[q + 1];
         const steps = Math.max(3, Math.ceil((v1 - v0) / 0.25));
@@ -2832,7 +2868,7 @@
       for (let i = 1; i < n && !blocked; i++) {
         const v = v0 + ((v1 - v0) * i) / n, [x, y] = toXY(ideal(v), v);
         const c = Math.floor(x / pixel), r = h - 1 - Math.floor(y / pixel);
-        if (c >= 0 && r >= 0 && c < w && r < h && depthOther[r * w + c] > 0) blocked = true;
+        if (c >= 0 && r >= 0 && c < w && r < h && depthOther[r * w + c] * pixel > edgeTol) blocked = true;
       }
       if (!blocked) return null;
       const cost = new Float64Array((n + 1) * m).fill(Infinity), back = new Int16Array((n + 1) * m);
@@ -2845,7 +2881,7 @@
           const u = uLo + j * du;
           const [x, y] = toXY(u, v);
           const c = Math.floor(x / pixel), r = h - 1 - Math.floor(y / pixel);
-          const dIn = c < 0 || r < 0 || c >= w || r >= h ? 0 : depthOther[r * w + c] * pixel;  // metres inside the other colour
+          const dIn = c < 0 || r < 0 || c >= w || r >= h ? 0 : depthOther[r * w + c] * pixel - edgeTol;  // metres beyond the tolerated edge
           const here = (dIn > 0 ? 10 + 20 * dIn : 0) + 0.3 * Math.abs(u - uEase);
           let best = Infinity, arg = 0;
           for (let k = Math.max(0, j - 2); k <= Math.min(m - 1, j + 2); k++) {
@@ -2874,7 +2910,7 @@
         for (let i = 1; i < n; i++) {
           const v = v0 + ((v1 - v0) * i) / n, [x, y] = toXY(uf(i, v), v);
           const c = Math.floor(x / pixel), r = h - 1 - Math.floor(y / pixel);
-          if (c >= 0 && r >= 0 && c < w && r < h && depthOther[r * w + c] > 0) o++;
+          if (c >= 0 && r >= 0 && c < w && r < h && depthOther[r * w + c] * pixel > edgeTol) o++;
         }
         return o * dv;
       };
@@ -2997,10 +3033,14 @@
     // such a crown it moves sideways (along the row) to the nearest point
     // that is not, then the bend is smoothed; the order of the lines (no
     // crossing) is restored last and always wins.
+    // (a line may just touch the edge of such a crown: only where it would
+    // run more than edgeTol inside it does it give way, so the lines stay
+    // smooth instead of dodging every ragged crown edge)
     const otherAt = (number, u, v) => {
       const [x, y] = toXY(u, v);
-      const l = labelAt(x, y);
-      return l > 0 && diagOfLabel[l] !== 0 && Math.abs(diagOfLabel[l]) % 2 !== Math.abs(number) % 2;
+      const c = Math.floor(x / pixel), r = h - 1 - Math.floor(y / pixel);
+      if (c < 0 || r < 0 || c >= w || r >= h) return false;
+      return depthIn[1 - (Math.abs(number) % 2)][r * w + c] * pixel > edgeTol;
     };
     const push = (number, s, margin) => {
       let moved = 0;
@@ -3014,7 +3054,7 @@
       }
       return moved;
     };
-    for (let round = 0; round < 2; round++) {
+    for (let round = 0; round < (opts.avoidOther === false ? 0 : 2); round++) {
       for (const [number, s] of samples) {
         const before = Float64Array.from(s.u);
         if (!push(number, s, pixel)) continue;
@@ -3033,7 +3073,7 @@
     // spread smoothly over 1.5 m on each side, and where lines must give way
     // to each other (no crossing), the moved points hold their place.
     for (const s of samples.values()) s.w = new Float64Array(s.u.length).fill(1);
-    for (let round = 0; round < 4; round++) {
+    for (let round = 0; round < (opts.avoidOther === false ? 0 : 4); round++) {
       let anyMoved = false;
       for (const [number, s] of samples) {
         const shift = new Float64Array(s.u.length);
@@ -3055,7 +3095,7 @@
         for (let i = 0; i < s.u.length; i++) {
           if (!shift[i]) continue;
           moved = true;
-          const spreadK = Math.round(Math.max(1.5, 2 * Math.abs(shift[i])) / STEP);   // gradual bends
+          const spreadK = Math.round(Math.max(opts.bendMin ?? 3, (opts.bendFactor ?? 3) * Math.abs(shift[i])) / STEP);   // gradual bends (over at least 3 m)
           for (let j = Math.max(0, i - spreadK); j <= Math.min(s.u.length - 1, i + spreadK); j++) {
             const f = shift[i] * (1 - Math.abs(j - i) / (spreadK + 1));
             if (Math.abs(f) > Math.abs(total2[j])) total2[j] = f;
@@ -3299,7 +3339,7 @@
         young_full_resolution: fineSearch && {
           positions_searched: fineSearch.on, found_on_positions: fineSearch.onFound,
           between_searched: fineSearch.between, found_between: fineSearch.betweenFound, offset_row_trees: fineSearch.runs,
-          counted: fineSearch.counted, young_trees_added: fineSearch.added,
+          counted: fineSearch.counted, young_trees_added: fineSearch.added, bare_soil: fineSearch.bare_soil,
         },
         line_points_moved_to_avoid_crossing: linesMoved,
         row_neighbours: rowPairs,
