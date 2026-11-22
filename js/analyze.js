@@ -2849,6 +2849,8 @@
       const ne = Math.max(3, Math.ceil(lenE / 0.25)), uL = uk[uk.length - 1], vL = vk[vk.length - 1];
       for (let s = 1; s <= ne; s++) { const d = (lenE * s) / ne; line.push([uL + slope * d, vL + d]); }
       void tail;
+      // where the line must pass through its own crowns (for the last step)
+      line.knots = ks.map((k, q) => (k.members ? [uk[q], vk[q]] : null)).filter(Boolean);
       return line;
     }
 
@@ -3157,6 +3159,38 @@
         if (after <= 1.15 * before + 0.01 * s.u.length) for (let i = 0; i < s.u.length; i++) s.u[i] = sm[i];
       }
       untangle(false);
+    }
+    // Last of all: every line runs through the middle of each of its own
+    // crowns. Where the steps above moved it off, it is pulled back (the
+    // pull spread smoothly from tree to tree, fading out past the end trees),
+    // and in keeping the lines apart those points hold their place.
+    if (opts.pinCentres !== false) {
+      for (let round = 0; round < 3; round++) {
+        for (const [number, s] of samples) {
+          const kn = (uvLines.get(number) || {}).knots || [];
+          const at = [];
+          for (const [ku, kv] of kn) {
+            const i = Math.round(kv / STEP) - s.k0;
+            if (i >= 0 && i < s.u.length) at.push([i, ku - s.u[i]]);
+          }
+          s.w = new Float64Array(s.u.length).fill(1);
+          if (!at.length) continue;
+          at.sort((p, q) => p[0] - q[0]);
+          const corr = new Float64Array(s.u.length), fade = Math.round(3 / STEP);
+          for (let i = 0; i < s.u.length; i++) {
+            if (i <= at[0][0]) corr[i] = at[0][1] * Math.max(0, 1 - (at[0][0] - i) / fade);
+            else if (i >= at[at.length - 1][0]) corr[i] = at[at.length - 1][1] * Math.max(0, 1 - (i - at[at.length - 1][0]) / fade);
+          }
+          for (let k = 0; k + 1 < at.length; k++) {
+            const [i0, d0] = at[k], [i1, d1] = at[k + 1];
+            for (let i = i0; i <= i1; i++) corr[i] = i1 > i0 ? d0 + ((d1 - d0) * (i - i0)) / (i1 - i0) : d0;
+          }
+          const sm = smooth(corr);
+          for (let i = 0; i < s.u.length; i++) s.u[i] += sm[i];
+          for (const [i] of at) for (let j = Math.max(0, i - 3); j <= Math.min(s.u.length - 1, i + 3); j++) s.w[j] = 30;
+        }
+        untangle(true);
+      }
     }
     let linesMoved = 0;
     for (const s of samples.values()) for (let i = 0; i < s.u.length; i++) if (Math.abs(s.u[i] - s.u0[i]) > 0.05) linesMoved++;
