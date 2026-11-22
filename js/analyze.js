@@ -1708,7 +1708,7 @@
     // height rules dropped, standing on an EMPTY planting position of a row,
     // is a young tree. It becomes a crown (flag YOUNG_TREE), so it is counted
     // and takes its place in the EVEN / ODD alternation.
-    let gridSearch = null, fineSearch = null, rowWalk = null, darkSearch = null, darkWalk = null;
+    let gridSearch = null, fineSearch = null, rowWalk = null, darkSearch = null, darkWalk = null, midWalk = null;
     if (small) {
       await step("Young trees on empty planting positions …");
       const I = inv2(a, b);
@@ -2069,7 +2069,7 @@
             for (const u of list) { if (toCrown[u] < gapC) gapC = toCrown[u]; lum += lumaAt(u); }
             if (gapC * pixel < 0.4) { why("nearcrown"); continue; }       // stands apart from the big crowns
             lum /= list.length;
-            if (lum < thresholds.darkY || lum < 0.7 * bgYmed) { why("dark " + Math.round(lum) + "/" + Math.round(bgYmed) + "/" + Math.round(thresholds.darkY)); continue; } // sunlit, not leaves in a shadow
+            if (lum < (L.darkMin ?? 1) * thresholds.darkY || lum < (L.sunlit ?? 0.7) * bgYmed) { why("dark " + Math.round(lum) + "/" + Math.round(bgYmed) + "/" + Math.round(thresholds.darkY)); continue; } // sunlit, not leaves in a shadow
             if (leak > (L.leak * edge2 * hop.length) / 4) { why("leak"); continue; } // not part of a band of grass
             const ring = ringGreens(list, 0.6);
             if (!ring.length) { why("noring"); continue; }
@@ -2664,6 +2664,45 @@
             darkWalk.added++;
           }
         }
+
+        // Young crowns in half shade or with darker leaves (between the
+        // sunlit and the dark rules: 55 to 70 % as bright as the ground
+        // around them, a little less green than the ground's best): one
+        // more walk along the rows, with its own check along the alleys.
+        if (opts.midWalk !== false) {
+          const Lm = { ...L, sunlit: 0.55, darkMin: 0.85, contrast: 0.08 };
+          for (const e of extra) if (e.young && e.pos) {
+            const lst = rows2.get(e.pos[1]);
+            if (lst && !lst.some((o) => Math.abs(o.u - Uf(e.spot)) < 0.1)) lst.push({ u: Uf(e.spot), v: Vf(e.spot), pos: e.pos, pt: e.spot });
+          }
+          const candsM = [];
+          midWalk = { onRows: 0, inAlleys: 0, counted: false, added: 0 };
+          const finderM = (x, y) => findSapling(x, y, Lm);
+          for (const list of rows2.values()) {
+            if (list.length < 2) continue;
+            list.sort((p1, p2) => p1.u - p2.u);
+            midWalk.onRows += walk(list, 0, candsM, finderM);
+            midWalk.inAlleys += walk(list, 0.5 * rowSp, null, finderM);
+          }
+          midWalk.counted = midWalk.onRows >= 3 && midWalk.inAlleys <= 0.15 * midWalk.onRows + 1;
+          for (const { pk, nearOwn } of midWalk.counted ? candsM : []) {
+            if (pk.list.some((u2) => labels[u2])) continue;
+            const pu = Uf(pk.spot);
+            let ps = null;
+            const o = nearOwn(pu, 1)[0];
+            if (o && o.pos) {
+              const ex = pk.spot[0] - o.pt[0], ey = pk.spot[1] - o.pt[1];
+              const uu = o.pos[0] + I[0][0] * ex + I[0][1] * ey, vv = o.pos[1] + I[1][0] * ex + I[1][1] * ey;
+              const pp = Math.round(uu), qq = Math.round(vv);
+              if (Math.abs(uu - pp) <= 0.35 && Math.abs(vv - qq) <= 0.3 && !occ.has(pp + "," + qq)) ps = [pp, qq];
+            }
+            if (ps) occ.add(siteOf(ps));
+            const id = count + extra.length + 1;
+            for (const u2 of pk.list) { labels[u2] = id; mask[u2] = 1; }
+            extra.push({ pos: ps, spot: pk.spot, size: pk.list.length, young: true });
+            midWalk.added++;
+          }
+        }
       }
     }
     const total = count + extra.length;
@@ -2823,7 +2862,12 @@
       for (let c of clusters) {
         if (c.length > 1) {
           const mid = c.reduce((s, k) => s + k.v, 0) / c.length;
-          c = c.slice().sort((p, q) => (p.u - q.u) * (slope >= 0 ? 1 : -1)).map((k, i, all) => ({ ...k, v: mid - gap / 2 + (gap * i) / (all.length - 1) }));
+          c = c.slice().sort((p, q) => (p.u - q.u) * (slope >= 0 ? 1 : -1)).map((k, i, all) => {
+            let v = mid - gap / 2 + (gap * i) / (all.length - 1);
+            // a small crown (young tree): the line passes it inside the crown
+            if (k.members && k.hi - k.lo < 2.5) v = Math.min(k.hi, Math.max(k.lo, v));
+            return { ...k, v };
+          });
         }
         ks.push(...c);
       }
@@ -2923,7 +2967,7 @@
       for (let s = 1; s <= ne; s++) { const d = (lenE * s) / ne; line.push([uL + slope * d, vL + d]); }
       void tail;
       // where the line must pass through its own crowns (for the last step)
-      line.knots = ks.map((k, q) => (k.members ? [uk[q], vk[q]] : null)).filter(Boolean);
+      line.knots = ks.map((k, q) => (k.members ? [uk[q], vk[q], k.hi - k.lo < 2.5] : null)).filter(Boolean);
       return line;
     }
 
@@ -2996,8 +3040,84 @@
       return out;
     }
 
+    // Crowns off the planting grid (young trees replanted at their own
+    // spacing, trees planted a little off) join a diagonal BEFORE the lines
+    // are drawn, so their line goes through them too: the diagonal at their
+    // own place in the grid, of the colour opposite to the crowns next to
+    // them along the row.
+    const preAssigned = new Uint8Array(total);
+    if (opts.offGridOnLines !== false) {
+      const Ig = inv2(a, b);
+      const placedT = [];
+      for (let t = 0; t < total; t++) if (aliveAll[t] && pos[t] && alt.shifted[t]) placedT.push(t);
+      const cellG = 2 * Math.max(inRow, rowSpacing), bucketsG = new Map();
+      for (const s of placedT) {
+        const k = Math.floor(pts[s][0] / cellG) + "," + Math.floor(pts[s][1] / cellG);
+        if (!bucketsG.has(k)) bucketsG.set(k, []);
+        bucketsG.get(k).push(s);
+      }
+      const parityOf = (d) => Math.abs(d) % 2;
+      // the trees of each diagonal (across, along the rows), for where its line runs
+      const diagTrees = new Map();
+      for (const s of placedT) {
+        if (!diagTrees.has(diagonal[s])) diagTrees.set(diagonal[s], []);
+        diagTrees.get(diagonal[s]).push([V(mids[s]), U(mids[s])]);
+      }
+      for (let t = 0; t < total; t++) {
+        if (!aliveAll[t] || pos[t]) continue;
+        const bx = Math.floor(pts[t][0] / cellG), by = Math.floor(pts[t][1] / cellG);
+        let near = -1, nd = Infinity;
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (const s of bucketsG.get((bx + dx) + "," + (by + dy)) || []) {
+          const d = Math.hypot(pts[s][0] - pts[t][0], pts[s][1] - pts[t][1]);
+          if (d < nd) { nd = d; near = s; }
+        }
+        if (near < 0) continue;
+        const ex = pts[t][0] - pts[near][0], ey = pts[t][1] - pts[near][1];
+        const pf = alt.shifted[near][0] + Ig[0][0] * ex + Ig[0][1] * ey, qf = alt.shifted[near][1] + Ig[1][0] * ex + Ig[1][1] * ey;
+        const kf = pf * stepDir[1] - qf * stepDir[0];
+        // colours of the crowns next to it along its row
+        const ut = U(mids[t]), vt = V(mids[t]);
+        let left = -1, right = -1, dl = Infinity, dr = Infinity;
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (const s of bucketsG.get((bx + dx) + "," + (by + dy)) || []) {
+          const du = U(mids[s]) - ut, dv = V(mids[s]) - vt;
+          if (Math.abs(dv) >= 0.4 * rowSpacing || du === 0 || Math.abs(du) > 1.5 * inRow) continue;
+          if (du > 0 && du < dr) { dr = du; right = s; }
+          if (du < 0 && -du < dl) { dl = -du; left = s; }
+        }
+        const sides = [left, right].filter((s) => s >= 0).map((s) => parityOf(diagonal[s]));
+        const avoid = sides.length && sides.every((p) => p === sides[0]) ? sides[0] : -1;
+        // a diagonal that already has a tree in this row would have two
+        // there (its line could not go through both): the free one, usually
+        // the empty planting position the young tree stands at
+        // Which line will run nearest to it: each nearby diagonal's line
+        // follows its own trees, so where it crosses this crown's row comes
+        // from its trees in the rows just before and after (or in this row).
+        // The nearest one takes it (the colour opposite to its row
+        // neighbours preferred, by up to 1 m); its line then needs the
+        // smallest bend and no other line has to give way.
+        let bestK = Math.round(kf), bestC = Infinity;
+        for (let k = Math.round(kf) - 3; k <= Math.round(kf) + 3; k++) {
+          const list = diagTrees.get(numberOf(k));
+          if (!list) continue;
+          let below = null, above = null;
+          for (const e of list) {
+            if (e[0] <= vt && (!below || e[0] > below[0])) below = e;
+            if (e[0] > vt && (!above || e[0] < above[0])) above = e;
+          }
+          let uAt = null;
+          if (below && above && above[0] - below[0] < 3 * rowSpacing) uAt = below[1] + ((above[1] - below[1]) * (vt - below[0])) / (above[0] - below[0]);
+          else { const e = below && vt - below[0] < 1.5 * rowSpacing ? below : above && above[0] - vt < 1.5 * rowSpacing ? above : null; if (e) uAt = e[1] + slope * (vt - e[0]); }
+          if (uAt === null) continue;
+          const c = Math.abs(uAt - ut) + (avoid >= 0 && parityOf(numberOf(k)) === avoid ? 1.0 : 0);
+          if (c < bestC) { bestC = c; bestK = k; }
+        }
+        diagonal[t] = numberOf(bestK);
+        diagOfLabel[t + 1] = diagonal[t];
+        preAssigned[t] = 1;
+      }
+    }
     const byDiag = new Map();
-    for (let t = 0; t < total; t++) if (aliveAll[t] && pos[t]) {
+    for (let t = 0; t < total; t++) if (aliveAll[t] && (pos[t] || preAssigned[t])) {
       if (!byDiag.has(diagonal[t])) byDiag.set(diagonal[t], []);
       byDiag.get(diagonal[t]).push(t);
     }
@@ -3245,10 +3365,12 @@
           // (a crown far from where the line runs, e.g. a young tree beside
           // its planting position, is not worth dragging the line and its
           // neighbours over: only pulls up to pinMax)
-          const pinMax = (opts.pinMax ?? 0.4) * inRow;
-          for (const [ku, kv] of kn) {
+          // (a small young crown: up to 0.7 of a tree spacing, else it is
+          // missed altogether)
+          const pinMax = (opts.pinMax ?? 0.4) * inRow, pinSmall = 0.7 * inRow;
+          for (const [ku, kv, small] of kn) {
             const i = Math.round(kv / STEP) - s.k0;
-            if (i >= 0 && i < s.u.length && Math.abs(ku - s.u[i]) <= pinMax) at.push([i, ku - s.u[i]]);
+            if (i >= 0 && i < s.u.length && Math.abs(ku - s.u[i]) <= (small ? pinSmall : pinMax)) at.push([i, ku - s.u[i]]);
           }
           s.w = new Float64Array(s.u.length).fill(1);
           if (!at.length) continue;
@@ -3258,13 +3380,29 @@
             if (i <= at[0][0]) corr[i] = at[0][1] * Math.max(0, 1 - (at[0][0] - i) / fade);
             else if (i >= at[at.length - 1][0]) corr[i] = at[at.length - 1][1] * Math.max(0, 1 - (i - at[at.length - 1][0]) / fade);
           }
+          // eased from tree to tree (flat at each tree: no corner there)
+          const easeS = (x) => x * x * (3 - 2 * x);
           for (let k = 0; k + 1 < at.length; k++) {
             const [i0, d0] = at[k], [i1, d1] = at[k + 1];
-            for (let i = i0; i <= i1; i++) corr[i] = i1 > i0 ? d0 + ((d1 - d0) * (i - i0)) / (i1 - i0) : d0;
+            for (let i = i0; i <= i1; i++) corr[i] = i1 > i0 ? d0 + (d1 - d0) * easeS((i - i0) / (i1 - i0)) : d0;
+          }
+          for (let i = 0; i < s.u.length; i++) {
+            if (i < at[0][0]) corr[i] = at[0][1] * easeS(Math.max(0, 1 - (at[0][0] - i) / fade));
+            else if (i > at[at.length - 1][0]) corr[i] = at[at.length - 1][1] * easeS(Math.max(0, 1 - (i - at[at.length - 1][0]) / fade));
           }
           const sm = smooth(corr);
           for (let i = 0; i < s.u.length; i++) s.u[i] += sm[i];
           for (const [i] of at) for (let j = Math.max(0, i - 3); j <= Math.min(s.u.length - 1, i + 3); j++) s.w[j] = 30;
+        }
+        untangle(true);
+      }
+      // round off the corners left where lines gave way to each other (the
+      // points at the crowns hold their place)
+      for (let round = 0; round < 3; round++) {
+        for (const s of samples.values()) {
+          if (!s.w) continue;
+          const sm = smooth(s.u);
+          for (let i = 0; i < s.u.length; i++) if (s.w[i] < 30) s.u[i] = sm[i];
         }
         untangle(true);
       }
@@ -3309,6 +3447,14 @@
     }
     for (let t = 0; t < total; t++) {
       if (!aliveAll[t] || pos[t]) continue;
+      if (preAssigned[t]) {
+        // joined its line before it was drawn; only if that line was pushed
+        // off it (to keep the lines apart) and another runs through it, it
+        // takes that one
+        const m = hits.get(t + 1);
+        if (m && m.size && !m.has(diagonal[t])) { diagonal[t] = [...m.entries()].reduce((p, q) => (q[1] > p[1] ? q : p))[0]; preAssigned[t] = 2; }
+        continue;
+      }
       const m = hits.get(t + 1);
       if (m && m.size) { diagonal[t] = [...m.entries()].reduce((p, q) => (q[1] > p[1] ? q : p))[0]; continue; }
       let best = 0, bestD = Infinity;
@@ -3326,7 +3472,7 @@
     if (opts.alternateRows !== false) {
       const drawnLines = [...lines.entries()].filter(([, list]) => list.length);
       for (let t = 0; t < total; t++) {
-        if (!aliveAll[t] || pos[t] || !diagonal[t]) continue;
+        if (!aliveAll[t] || pos[t] || !diagonal[t] || preAssigned[t]) continue;
         const ut = U(knots[t]), vt = V(knots[t]);
         let left = -1, right = -1, dl = Infinity, dr = Infinity;
         for (let s = 0; s < total; s++) {
@@ -3447,6 +3593,7 @@
         young_row_walk: rowWalk,
         young_dark_search: darkSearch,
         young_dark_walk: darkWalk,
+        young_half_shade_walk: midWalk,
         young_full_resolution: fineSearch && {
           positions_searched: fineSearch.on, found_on_positions: fineSearch.onFound,
           between_searched: fineSearch.between, found_between: fineSearch.betweenFound, offset_row_trees: fineSearch.runs,
