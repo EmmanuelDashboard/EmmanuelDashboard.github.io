@@ -649,7 +649,50 @@
     return { P, at };
   }
 
-  function measureGrid(points, designFt) {
+  // How clearly the treetops form rows running at angle ang (radians):
+  // projected across the rows they pile up every row spacing (lag within
+  // 0.7 to 1.4 times the design distance), and not at half of it (that
+  // would be the trees within a row, i.e. columns).
+  function rowScore(points, ang, between) {
+    const across = [-Math.sin(ang), Math.cos(ang)], bin = 0.25;
+    const proj = points.map(([x, y]) => x * across[0] + y * across[1]);
+    let lo = Infinity, hi = -Infinity;
+    for (const v of proj) { if (v < lo) lo = v; if (v > hi) hi = v; }
+    const nb = Math.floor((hi - lo) / bin) + 1;
+    if (nb < 40) return { score: 0, lag: 0 };
+    let hist = new Float32Array(nb);
+    for (const v of proj) hist[Math.floor((v - lo) / bin)]++;
+    hist = gauss(hist, nb, 1, 0.6 / bin);
+    let mean = 0;
+    for (const v of hist) mean += v;
+    mean /= nb;
+    const ac = (lag) => { let s = 0; for (let i = 0; i + lag < nb; i++) s += (hist[i] - mean) * (hist[i + lag] - mean); return s / (nb - lag); };
+    const ac0 = ac(0);
+    if (!(ac0 > 0)) return { score: 0, lag: 0 };
+    let best = { score: -Infinity, lag: 0 };
+    for (let l = Math.round((0.7 * between) / bin); l <= Math.min(nb - 1, Math.round((1.4 * between) / bin)); l++) {
+      const v = ac(l) / ac0, half = ac(Math.round(l / 2)) / ac0;
+      const sc = v - Math.max(0, half);
+      if (sc > best.score) best = { score: sc, lag: l * bin };
+    }
+    return best;
+  }
+  // The direction of the rows: the angle at which the treetops form rows
+  // most clearly (0.5° steps, then refined).
+  function bestRowDirection(points, between) {
+    let best = { score: -Infinity, ang: 0 };
+    for (let d = 0; d < 180; d += 1) {
+      const r = rowScore(points, (d * Math.PI) / 180, between);
+      if (r.score > best.score) best = { score: r.score, ang: (d * Math.PI) / 180, lag: r.lag };
+    }
+    for (let d = -1; d <= 1; d += 0.25) {
+      const ang = best.ang + (d * Math.PI) / 180, r = rowScore(points, ang, between);
+      if (r.score > best.score) best = { score: r.score, ang, lag: r.lag };
+    }
+    return best.score > 0 ? best : null;
+  }
+
+  function measureGrid(points, designFt, opts0 = {}) {
     const nearest = nearestDistances(points);
     const radius = 3.2 * nearest;
     const pairs = pairsWithin(points, radius);
@@ -696,6 +739,30 @@
       b = ordered.slice(1).find((v) => cross(a, v) > Math.sin((20 * Math.PI) / 180)) || null;
       if (!b) throw new Error("Only one planting direction found in the crowns.");
     }
+    // The rows must run where the treetops really form rows. Old orchards
+    // with touching crowns have no clear tree-to-tree distance, and the
+    // step picked above can then be a chance direction across the rows;
+    // the rows themselves (parallel lines one row spacing apart) are then
+    // the better guide, and the grid is turned to them.
+    let turned = false;
+    if (designFt && opts0.checkRows !== false) {
+      const between = designFt[1] * 0.3048;
+      const best = bestRowDirection(points, between);
+      if (best) {
+        const angA = Math.atan2(a[1], a[0]);
+        let diff = Math.abs(angA - best.ang) % Math.PI;
+        diff = Math.min(diff, Math.PI - diff);
+        const own = rowScore(points, angA, between);
+        if (opts0.debug) opts0.debug({ bestDeg: (best.ang * 180) / Math.PI, bestScore: best.score, bestLag: best.lag, ownDeg: (angA * 180) / Math.PI, ownScore: own.score, ownLag: own.lag });   // testing only
+        // (only to rows one design spacing apart, clearly better than the
+        // direction picked above)
+        if (diff > (4 * Math.PI) / 180 && own.score < 0.6 * best.score && Math.abs(best.lag / between - 1) <= 0.15 && best.score >= 0.25) {
+          const L = len(a);
+          a = [L * Math.cos(best.ang), L * Math.sin(best.ang)];
+          turned = true;
+        }
+      }
+    }
     // The real distance between rows, measured on the treetops (the trees
     // of a row pile up at one place across the rows). Where the design
     // spacing is not what was planted, the measured one is used.
@@ -704,7 +771,7 @@
       const rp = rowPeriod(points, across, len(a));
       const P = rp && rp.P;
       const perp = (v) => Math.abs(v[0] * across[0] + v[1] * across[1]);
-      if (P && Math.abs(perp(b) / P - 1) > 0.12 && rp.at(perp(b)) < 0.7 * rp.at(P)) {
+      if (P && (turned || (Math.abs(perp(b) / P - 1) > 0.12 && rp.at(perp(b)) < 0.7 * rp.at(P)))) {
         const fits = found.filter((f) => Math.abs(perp(f.v) / P - 1) <= 0.12 && cross(a, f.v) > Math.sin((20 * Math.PI) / 180));
         if (fits.length) b = fits.reduce((p, q) => (q.s > p.s ? q : p)).v;
         else {
@@ -724,6 +791,9 @@
           const shift = Math.hypot(cs, sn) > 0 ? (Math.atan2(sn, cs) / (2 * Math.PI)) * ia : 0;
           b = [sgn * (P * across[0] + shift * ah[0]), sgn * (P * across[1] + shift * ah[1])];
         }
+      } else if (turned && !P) {
+        const between = designFt[1] * 0.3048, sgn = b[0] * across[0] + b[1] * across[1] < 0 ? -1 : 1;
+        b = [sgn * between * across[0], sgn * between * across[1]];
       }
     }
     for (let k = 0; k < 20; k++) {
@@ -1454,7 +1524,7 @@
     const eligible = Array.from({ length: count }, (_, t) => sizes[t + 1] * area >= 2.0);
     const gridPts = pts.filter((_, t) => eligible[t]);
     const gridIdx = pts.map((_, t) => t).filter((t) => eligible[t]);
-    const { a, b } = measureGrid(gridPts, design);
+    const { a, b } = measureGrid(gridPts, design, { checkRows: opts.checkRows, debug: opts.debugGrid });
     const gp = gridPositions(gridPts, a, b);
     const pos = Array.from({ length: count }, () => null);
     gridIdx.forEach((t, k) => { if (gp.placed[k]) pos[t] = gp.pos[k]; });
@@ -2482,11 +2552,12 @@
       // Row walk: along every row of trees (its own line, on to the end of
       // its tree strip) young trees are looked for between and beyond the
       // trees, also where the trees stand at another spacing than the grid
-      // (a block planted differently). Only on images where the search above
-      // was trusted (strips free of weeds), only young crowns of at least
-      // 0.3 m², and each at least about a tree spacing from every tree of
-      // its row (so never a weed beside a tree).
-      if (gridSearch && gridSearch.counted) {
+      // (a block planted differently; young trees replanted at their own
+      // spacing). Only where the grid is the planting design, only young
+      // crowns of at least 0.3 m², each at least about a tree spacing from
+      // every tree of its row (so never a weed beside a tree), and only when
+      // the same walk along the grass alleys finds almost nothing (below).
+      if (gridSearch && (gridSearch.gridOk || opts.forceRowWalk)) {
         await step("Young trees: walking along every row …");
         const ah = [a[0] / inRow, a[1] / inRow];
         const Uf = (p2) => p2[0] * ah[0] + p2[1] * ah[1], Vf = (p2) => p2[0] * acr[0] + p2[1] * acr[1];
@@ -2711,8 +2782,10 @@
           const l = labelAt(x, y);
           if (l > 0 && diagOfLabel[l] !== number) other++;
         }
-        const key = [Math.round(other * pixel * 10) / 10, Math.abs(u - uGuess)];
-        if (!best || key[0] < best[0] || (key[0] === best[0] && key[1] < best[1])) { best = key; bestU = u; }
+        // least canopy of the other colour, but each metre sideways counts
+        // too (else neighbouring lines all crowd into the same gap)
+        const cost = other * pixel + (opts.crossPenalty ?? 0.5) * Math.abs(u - uGuess);
+        if (!best || cost < best[0] - 1e-9) { best = [cost]; bestU = u; }
       }
       return bestU;
     };
@@ -3169,9 +3242,13 @@
         for (const [number, s] of samples) {
           const kn = (uvLines.get(number) || {}).knots || [];
           const at = [];
+          // (a crown far from where the line runs, e.g. a young tree beside
+          // its planting position, is not worth dragging the line and its
+          // neighbours over: only pulls up to pinMax)
+          const pinMax = (opts.pinMax ?? 0.4) * inRow;
           for (const [ku, kv] of kn) {
             const i = Math.round(kv / STEP) - s.k0;
-            if (i >= 0 && i < s.u.length) at.push([i, ku - s.u[i]]);
+            if (i >= 0 && i < s.u.length && Math.abs(ku - s.u[i]) <= pinMax) at.push([i, ku - s.u[i]]);
           }
           s.w = new Float64Array(s.u.length).fill(1);
           if (!at.length) continue;
