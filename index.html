@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-  <link rel="stylesheet" href="css/app.css?v=2026-11-22a">
+  <link rel="stylesheet" href="css/app.css?v=2026-11-22b">
 </head>
 <body>
   <header class="topbar">
@@ -286,6 +286,14 @@
             <option value="9">Fine (slower; needs a strong computer)</option>
           </select>
         </label>
+        <label class="field">
+          <span>Diagonals</span>
+          <select id="an-diagonals">
+            <option value="auto" selected>Automatic (oblique 45° where the rows run east–west)</option>
+            <option value="true">True diagonal: next tree in the next row (about 63° to the rows; offset pattern left)</option>
+            <option value="oblique">Oblique 45°: two trees along in the next row (same trees removed in every row)</option>
+          </select>
+        </label>
       </div>
       <p class="muted small">The image is analysed on this computer and is not uploaded. It takes about one minute. The Kaggle notebook runs this same engine: with the same image, DSM and Detail it gives exactly the same results.</p>
       <div class="modal-actions">
@@ -358,7 +366,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/polygon-clipping@0.15.7/dist/polygon-clipping.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/geotiff@2.1.3/dist-browser/geotiff.js"></script>
-  <script src="js/analyze.js?v=2026-11-22a"></script>
-  <script src="js/app.js?v=2026-11-22a"></script>
+  <script src="js/analyze.js?v=2026-11-22b"></script>
+  <script src="js/app.js?v=2026-11-22b"></script>
 </body>
 </html>

@@ -584,6 +584,7 @@
         resolve({
           designFt: design === "auto" ? null : design.split(",").map(Number),
           budget: Number($("an-detail").value) * 1e6,
+          diagonalStyle: $("an-diagonals") ? $("an-diagonals").value : "auto",
           pixel: info.geo ? null : Number($("an-pixel").value) / 100,
           dsm: dsmFile,
         });
@@ -776,7 +777,7 @@
     }
     let result;
     try {
-      result = await PecanAnalysis.analyze({ rgba, width: W, height: H, pixel, surface }, { designFt: choice.designFt, directionHintDeg: 114, chip }, (text) => setLoading(text));
+      result = await PecanAnalysis.analyze({ rgba, width: W, height: H, pixel, surface }, { designFt: choice.designFt, directionHintDeg: 114, chip, diagonalStyle: choice.diagonalStyle }, (text) => setLoading(text));
     } catch (err) {
       URL.revokeObjectURL(url);
       setLoading(null);

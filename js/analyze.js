@@ -2745,7 +2745,16 @@
     await step("Drawing the EVEN / ODD diagonals …");
     const angle = (v) => ((Math.atan2(-v[1], v[0]) * 180) / Math.PI + 360) % 180;
     const gapTo = (deg) => { const g = Math.abs(deg - hint) % 180; return Math.min(g, 180 - g); };
-    const options = [[[a[0] + b[0], a[1] + b[1]], [1, 1]], [[a[0] - b[0], a[1] - b[1]], [1, -1]]].sort((p, q) => gapTo(angle(p[0])) - gapTo(angle(q[0])));
+    // The diagonal joins a tree to the next tree in the next row (true
+    // diagonal, at about 63° to rows 40 ft apart with trees 20 ft apart),
+    // or to the tree two places along in the next row ("oblique", about
+    // 45°: the same trees are then removed in every row). Automatic: the
+    // oblique lines where the rows run east-west (within 20°: there the
+    // true diagonal looks nearly vertical on the map), else the true one.
+    const diagOptions = (m) => [[[m * a[0] + b[0], m * a[1] + b[1]], [m, 1]], [[m * a[0] - b[0], m * a[1] - b[1]], [m, -1]]].sort((p, q) => gapTo(angle(p[0])) - gapTo(angle(q[0])));
+    let diagStyle = opts.diagonalStyle || "auto";
+    if (diagStyle === "auto") { const ra = angle(a); diagStyle = Math.min(ra, 180 - ra) < 20 ? "oblique" : "true"; }
+    const options = diagOptions(diagStyle === "oblique" ? 2 : 1);
     const [vector, stepDir] = options[0];
     const stepM = len(vector);
     const pitch = Math.abs(a[0] * b[1] - a[1] * b[0]) / stepM;
@@ -3579,6 +3588,7 @@
         diagonal_image_angle_deg: angle(vector),
         diagonal_spacing_m: pitch,
         diagonal_count: lines.size,
+        diagonal_style: diagStyle,
         alternate_along_rows: opts.alternateRows !== false,
         crowns_moved_across_gap: alt.moved.reduce((s, v, t) => s + (v && aliveAll[t] ? 1 : 0), 0),
         diagonal_extra_steps_from_moves: alt.extraSteps,
