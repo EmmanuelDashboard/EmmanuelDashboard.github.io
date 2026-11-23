@@ -3518,7 +3518,10 @@
           const u = U(mids[t]), v = V(mids[t]), wt = Math.max(1, area2[t + 1]);
           const e = ext.get(t), small = e ? e[1] - e[0] < 2.5 : false;
           const k = m.get(r);
-          if (!k || wt > k.w) m.set(r, { u, v, w: wt, crown: true, small });
+          const kn = { u, v, w: wt, crown: true, small, t };
+          if (!k) m.set(r, kn);
+          else if (wt > k.w) { kn.more = (k.more || []).concat([{ ...k, more: undefined }]); m.set(r, kn); }
+          else (k.more = k.more || []).push(kn);
         }
         K.set(num, m);
       }
@@ -3601,10 +3604,40 @@
         for (let s = 0.5; s < 2000; s += 0.5) { const [x, y] = toXY(u0 + dir * slope * s, v0 + dir * s); if (!validAt(x, y)) break; d = s; }
         return d + 0.5;
       };
+      // Inside a row the line goes straight across it: through its own tree
+      // from where it enters it to where it leaves it (so it never slants out
+      // through the side into the tree of the other colour next to it), or,
+      // in a row without its own tree, straight through the gap or canopy of
+      // its own colour where it crosses; the step along the row is made in
+      // the open ground between the rows (a wave from row to row).
+      const across = opts.laneAcross !== false;
+      const bandAt = (u, v, t) => {
+        if (t !== undefined && ext.has(t)) { const [lo, hi] = ext.get(t); return [lo, hi]; }
+        let lo = v, hi = v;
+        const lim = 0.45 * rowSpacing;
+        for (let s = pixel / 2; s < lim; s += pixel / 2) { const [x, y] = toXY(u, v - s); if (!(labelAt(x, y) > 0)) break; lo = v - s; }
+        for (let s = pixel / 2; s < lim; s += pixel / 2) { const [x, y] = toXY(u, v + s); if (!(labelAt(x, y) > 0)) break; hi = v + s; }
+        return [lo, hi];
+      };
       for (const num of nums) {
-        const ks = [...filled.get(num).values()].sort((p, q) => p.v - q.v);
-        if (!ks.length) continue;
-        for (let q = 1; q < ks.length; q++) ks[q].v = Math.max(ks[q].v, ks[q - 1].v + 0.5);
+        // (a second tree of the line in the same row, e.g. a young tree
+        // beside the planting position: the line visits it too)
+        const ks0 = [];
+        for (const k of filled.get(num).values()) { ks0.push(k); for (const k2 of k.more || []) ks0.push({ ...k2, extraVisit: true }); }
+        ks0.sort((p, q) => p.v - q.v);
+        if (!ks0.length) continue;
+        for (let q = 1; q < ks0.length; q++) ks0[q].v = Math.max(ks0[q].v, ks0[q - 1].v + 0.5);
+        // each knot becomes an entry and an exit point on the same u
+        const ks = [];
+        for (const k of ks0) {
+          if (!across || k.extraVisit) { ks.push({ u: k.u, v: Math.max(k.v, ks.length ? ks[ks.length - 1].v + 0.3 : -Infinity), flat: false }); continue; }
+          let [lo, hi] = bandAt(k.u, k.v, k.crown ? k.t : undefined);
+          lo = Math.min(k.v, lo + 0.3); hi = Math.max(k.v, hi - 0.3);
+          const prevV = ks.length ? ks[ks.length - 1].v : -Infinity;
+          if (lo <= prevV + 0.5) lo = Math.min(k.v, prevV + 0.5);
+          if (hi - lo > 0.6) { ks.push({ u: k.u, v: lo, flat: true }); ks.push({ u: k.u, v: hi, flat: false }); }
+          else ks.push({ u: k.u, v: k.v, flat: false });
+        }
         const line = [], f = ks[0], l = ks[ks.length - 1];
         const lenB = Math.max(1.5, edgeAlong(f.u, f.v, -1)), lenE = Math.max(1.5, edgeAlong(l.u, l.v, 1));
         const nb = Math.max(3, Math.ceil(lenB / 0.25));
@@ -3612,11 +3645,15 @@
         line.push([f.u, f.v]);
         for (let q = 0; q + 1 < ks.length; q++) {
           const a0 = ks[q], a1 = ks[q + 1], steps = Math.max(3, Math.ceil((a1.v - a0.v) / 0.25));
-          for (let s = 1; s <= steps; s++) { const t = s / steps; line.push([a0.u + (a1.u - a0.u) * S(t), a0.v + (a1.v - a0.v) * t]); }
+          for (let s = 1; s <= steps; s++) {
+            const t = s / steps;
+            const g = a0.flat ? 0 : across ? t * t * (3 - 2 * t) : S(t);   // straight across inside the row, a smooth S between rows
+            line.push([a0.u + (a1.u - a0.u) * g, a0.v + (a1.v - a0.v) * t]);
+          }
         }
         const ne = Math.max(3, Math.ceil(lenE / 0.25));
         for (let s = 1; s <= ne; s++) { const d = (lenE * s) / ne; line.push([l.u + slope * d, l.v + d]); }
-        line.knots = ks.filter((k) => k.crown).map((k) => [k.u, k.v, k.small]);
+        line.knots = ks0.filter((k) => k.crown).map((k) => [k.u, k.v, k.small]);
         uvLines.set(num, line);
       }
     } else for (const [number, members] of [...byDiag.entries()].sort((p, q) => p[0] - q[0])) {

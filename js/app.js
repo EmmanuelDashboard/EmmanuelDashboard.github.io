@@ -1198,10 +1198,10 @@
       d.haloLayers = [];
       for (const piece of d.pieces) {
         const ll = piece.map(toLL);
-        const halo = L.polyline(ll, { renderer: renderers.lines, pane: "main", color: "#ffffff", weight: 4.2, opacity: 0.9, interactive: false });
+        const halo = L.polyline(ll, { renderer: renderers.lines, pane: "main", color: "#ffffff", weight: 2.6, opacity: 0.85, interactive: false });
         halo.addTo(layers.lines[d.family]);
         d.haloLayers.push(halo);
-        const line = L.polyline(ll, { renderer: renderers.lines, pane: "main", color: colour, weight: 2, opacity: 1 });
+        const line = L.polyline(ll, { renderer: renderers.lines, pane: "main", color: colour, weight: 1.3, opacity: 1 });
         line.bindTooltip(() => diagonalTip(d), { sticky: true, className: "crown-tip", direction: "top", offset: [0, -6] });
         line.on("click", (e) => onDiagonalClick(d, e));
         line.addTo(layers.lines[d.family]);
@@ -2042,7 +2042,20 @@
     const area = { EVEN: 0, ODD: 0 };
     for (const c of state.crowns.values()) if (!c.removed && !c.excluded) area[family(c.diagonal)] += c.area;
     const fam = area.ODD <= area.EVEN ? "ODD" : "EVEN";
-    const first = (f) => candidates.find((d) => family(d) === f);
+    // A real first line: at least 2 trees, or 1 tree of normal size (the
+    // corner tree of a block). A lone small crown at the field edge (a
+    // stray young tree or a piece of canopy) is not where thinning starts.
+    const perDiag = new Map(), areas = [];
+    for (const c of state.crowns.values()) {
+      if (c.removed || c.excluded) continue;
+      const e = perDiag.get(c.diagonal) || { n: 0, a: 0 };
+      e.n++; e.a = Math.max(e.a, c.area); perDiag.set(c.diagonal, e);
+      areas.push(c.area);
+    }
+    areas.sort((p, q) => p - q);
+    const median = areas.length ? areas[areas.length >> 1] : 0;
+    const real = (d) => { const e = perDiag.get(d); return !!e && (e.n >= 2 || e.a >= 0.5 * median); };
+    const first = (f) => candidates.find((d) => family(d) === f && real(d)) ?? candidates.find((d) => family(d) === f);
     const pick = first(fam);
     return pick !== undefined ? pick : candidates[0] ?? null;
   }
@@ -2269,7 +2282,7 @@
       ctx.globalAlpha = 1;
 
       // Diagonals with arrows, then the START line on top.
-      const lineW = Math.max(1.2, 0.3 * s);
+      const lineW = Math.max(0.9, 0.2 * s);
       const drawLine = (piece, colour, width) => {
         ctx.beginPath();
         piece.forEach(([x, y], k) => (k ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y))));
