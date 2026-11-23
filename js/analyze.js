@@ -1435,6 +1435,7 @@
     // 1 m in the DSM, so the steps below drop them. They are kept aside and
     // count only where they stand on an empty planting position.
     const small = opts.youngTrees === false ? null : closing(mask, w, h, 0.25 / pixel);
+    if (opts.debug && small) opts.debug("small", small);   // testing only
     mask = closing(mask, w, h, 0.25 / pixel);
     mask = opening(mask, w, h, 0.2 / pixel);
     mask = fillSmallHoles(mask, w, h, Math.round(4.0 / area));
@@ -1708,7 +1709,7 @@
     // height rules dropped, standing on an EMPTY planting position of a row,
     // is a young tree. It becomes a crown (flag YOUNG_TREE), so it is counted
     // and takes its place in the EVEN / ODD alternation.
-    let gridSearch = null, fineSearch = null, rowWalk = null, darkSearch = null, darkWalk = null, midWalk = null;
+    let gridSearch = null, fineSearch = null, rowWalk = null, darkSearch = null, darkWalk = null, midWalk = null, leafWalk = null;
     if (small) {
       await step("Young trees on empty planting positions …");
       const I = inv2(a, b);
@@ -2570,7 +2571,8 @@
         const cands = [];
         // walk one line (the row, or the alley beside it: lineShift = 0 or
         // half a row spacing); young crowns found, at least minGap apart
-        const walk = (list, lineShift, keep, finder = (x, y) => findSapling(x, y, L), minA = 0.45) => {
+        const walk = (list, lineShift, keep, finder = (x, y) => findSapling(x, y, L), minA = 0.45, tag = null, cfg = {}) => {
+          const clearMin = cfg.clear ?? 1.0, gapMin = cfg.minGap ?? minGap;
           const nearOwn = (u, k) => list.map((o) => [Math.abs(o.u - u), o]).sort((x, y) => x[0] - y[0]).slice(0, k).map((x) => x[1]);
           const vAt = (u) => percentile(nearOwn(u, 3).map((o) => o.v), 50) + lineShift;
           const picks = [];
@@ -2583,7 +2585,7 @@
             if (Math.abs(Vf(pk.spot) - vAt(pu)) > 1.6 * rIn) continue;                    // on the line
             let clear = Infinity;
             for (const u2 of pk.list) if (toCrown[u2] < clear) clear = toCrown[u2];
-            if (clear * pixel < 1.0) continue;                                             // standing clear of big crowns
+            if (clear * pixel < clearMin) continue;                                        // standing clear of big crowns
             if (picks.some((o) => Math.hypot(o.spot[0] - pk.spot[0], o.spot[1] - pk.spot[1]) < 0.5)) continue;
             picks.push(pk);
           }
@@ -2591,11 +2593,12 @@
           const taken = lineShift ? [] : list.map((o) => o.u), out = [];
           for (const pk of picks) {
             const pu = Uf(pk.spot);
-            if (taken.some((tu) => Math.abs(tu - pu) < minGap)) continue;
+            if (taken.some((tu) => Math.abs(tu - pu) < gapMin)) continue;
             taken.push(pu);
             out.push(pk);
           }
           if (keep) for (const pk of out) keep.push({ pk, list, nearOwn });
+          if (opts.debugYoung && tag) for (const pk of out) opts.debugYoung(tag + (keep ? "_row" : "_alley"), pk.spot, pk.spot, pk.list.length * area, pk.info || true);   // testing only
           return out.length;
         };
         for (const list of rows2.values()) {
@@ -2702,6 +2705,214 @@
             extra.push({ pos: ps, spot: pk.spot, size: pk.list.length, young: true });
             midWalk.added++;
           }
+        }
+
+        // Young pecans the colour rules above miss (smaller, darker, at the
+        // strip edge): any plant on the row whose leaves the pecan-canopy
+        // classifier of this image recognises (grass and weeds it does not),
+        // outlined from those leaves out to the plant's edge. Walked along
+        // every row (young trees at 20 ft or closer, at least about 10 ft
+        // apart), checked along the grass alleys like the walks above.
+        if (opts.leafWalk !== false && small) {
+          const rowOf = (pt) => {
+            let best = null, bd = Infinity;
+            for (const [q, lst] of rows2) {
+              if (!lst.length) continue;
+              const vv = percentile(lst.map((o) => o.v), 50), d = Math.abs(vv - Vf(pt));
+              if (d < bd) { bd = d; best = q; }
+            }
+            return bd < 0.5 * rowSp ? best : null;
+          };
+          for (const e of extra) if (e.young) {
+            const q = e.pos ? e.pos[1] : rowOf(e.spot), lst = q !== null ? rows2.get(q) : null;
+            if (lst && !lst.some((o) => Math.abs(o.u - Uf(e.spot)) < 0.1)) lst.push({ u: Uf(e.spot), v: Vf(e.spot), pos: e.pos, pt: e.spot });
+          }
+          const grow = Math.max(1, Math.round(0.6 / pixel));
+          const findLeafy = (sx, sy) => {
+            const cc = Math.floor(sx / pixel), rr = h - 1 - Math.floor(sy / pixel);
+            if (cc < R || rr < R || cc >= w - R || rr >= h - R) return null;
+            if (!valid[rr * w + cc] || toEdge[rr * w + cc] * pixel < 2.0) return null;
+            const soil = [];
+            for (let y = rr - R; y <= rr + R; y++) for (let x = cc - R; x <= cc + R; x++) {
+              const d = Math.hypot(x - cc, y - rr) * pixel, k = y * w + x;
+              if (d > rIn && d <= rOut && free(k) && !small[k]) soil.push(exgAt(k));
+            }
+            if (soil.length < 20) return null;
+            const thrG = percentile(soil, 50) + 0.04;
+            const seen = new Set();
+            let pick = null;
+            for (let y = rr - R; y <= rr + R; y++) for (let x = cc - R; x <= cc + R; x++) {
+              const k0 = y * w + x;
+              if (seen.has(k0) || !small[k0] || !free(k0) || Math.hypot(x - cc, y - rr) * pixel > rIn) continue;
+              // the leaves the classifier recognises ...
+              const core = [], st = [k0];
+              seen.add(k0);
+              while (st.length) {
+                const u = st.pop(), ux = u % w, uy = (u / w) | 0;
+                core.push(u);
+                for (const [dx, dy] of hop) {
+                  const vx = ux + dx, vy = uy + dy, v = vy * w + vx;
+                  if (vx < cc - R || vx > cc + R || vy < rr - R || vy > rr + R || seen.has(v)) continue;
+                  if (!small[v] || !free(v)) continue;
+                  seen.add(v); st.push(v);
+                }
+              }
+              const whyL = (reason, lst) => { if (opts.debugYoung) { let a2 = 0, b2 = 0; for (const u of lst) { a2 += u % w; b2 += (u / w) | 0; } opts.debugYoung("leafwhy", [(a2 / lst.length + 0.5) * pixel, (h - b2 / lst.length - 0.5) * pixel], [sx, sy], lst.length * area, reason); } };   // testing only
+              if (core.length * area < (opts.leafCore ?? 0.05)) { whyL("core", core); continue; }
+              // ... and the rest of the plant: green pixels joined to them, up to 0.6 m out
+              const inP = new Map(core.map((u) => [u, 0]));
+              const q2 = core.slice();
+              for (let qi = 0; qi < q2.length; qi++) {
+                const u = q2[qi], ux = u % w, uy = (u / w) | 0, du = inP.get(u);
+                if (du >= grow) continue;
+                for (const [dx, dy] of hop) {
+                  const vx = ux + dx, vy = uy + dy, v = vy * w + vx;
+                  if (vx < 0 || vy < 0 || vx >= w || vy >= h || inP.has(v) || !free(v) || exgAt(v) < thrG) continue;
+                  inP.set(v, du + 1); q2.push(v);
+                }
+              }
+              const list = [...inP.keys()];
+              const A = list.length * area;
+              if (A < 0.15 || A > 4) { whyL("size", list); continue; }
+              let mx2 = 0, my2 = 0;
+              for (const u of list) { mx2 += u % w; my2 += (u / w) | 0; }
+              mx2 /= list.length; my2 /= list.length;
+              let reach2 = 0, edgeOut = 0;
+              for (const u of list) {
+                reach2 = Math.max(reach2, ((u % w) - mx2) ** 2 + (((u / w) | 0) - my2) ** 2);
+                if (inP.get(u) >= grow) edgeOut++;
+              }
+              if (Math.sqrt(reach2) * pixel > 0.3 * inRow) { whyL("band", list); continue; } // a plant, not a band
+              if (edgeOut > 0.25 * list.length) { whyL("grass", list); continue; }     // green going on: grass
+              // it stands on the bare tree strip: at least 40 % of the ground
+              // right around it (0.4 m) is bare soil, not grass
+              {
+                const rg = Math.max(1, Math.round(0.4 / pixel)), ringSeen = new Set();
+                let ringN = 0, ringBare = 0;
+                for (const u of list) {
+                  const ux = u % w, uy = (u / w) | 0;
+                  for (let dy = -rg; dy <= rg; dy++) for (let dx = -rg; dx <= rg; dx++) {
+                    const vx = ux + dx, vy = uy + dy, v = vy * w + vx;
+                    if (vx < 0 || vy < 0 || vx >= w || vy >= h || inP.has(v) || ringSeen.has(v) || dx * dx + dy * dy > rg * rg) continue;
+                    ringSeen.add(v);
+                    if (!free(v)) continue;
+                    ringN++;
+                    if (exgAt(v) < 0.06) ringBare++;
+                  }
+                }
+                if (!ringN || ringBare < (opts.leafRing ?? 0.4) * ringN) { whyL("ring " + (ringBare / Math.max(1, ringN)).toFixed(2), list); continue; }
+              }
+              whyL("OK", list);
+              const score = core.length;
+              let gSum = 0, yS = 0;
+              for (const u of core) { gSum += exgAt(u); yS += lumaAt(u); }
+              if (!pick || score > pick.score) pick = { list, score, spot: [(mx2 + 0.5) * pixel, (h - my2 - 0.5) * pixel], info: { coreA: core.length * area, coreFrac: core.length / list.length, coreExg: gSum / core.length, coreY: yS / core.length, soil: thrG - 0.04 } };
+            }
+            return { pick, near: !!pick && Math.hypot(pick.spot[0] - sx, pick.spot[1] - sy) <= rIn };
+          };
+          const candsL = [];
+          leafWalk = { onRows: 0, inAlleys: 0, counted: false, added: 0 };
+          for (const list of rows2.values()) {
+            if (list.length < 2) continue;
+            list.sort((p1, p2) => p1.u - p2.u);
+            // young trees at 20 ft or closer: down to 0.4 of the spacing apart
+            const cfgL = { minGap: 0.4 * inRow, clear: 0.6 };
+            leafWalk.onRows += walk(list, 0, candsL, findLeafy, 0.15, "leaf", cfgL);
+            leafWalk.inAlleys += walk(list, 0.5 * rowSp, null, findLeafy, 0.15, "leaf", cfgL);
+          }
+          leafWalk.counted = leafWalk.onRows >= 3 && leafWalk.inAlleys <= 0.15 * leafWalk.onRows + 1;
+          // With the DSM: a young pecan stands up (0.4 to 4 m), weeds lie low,
+          // and over 4 m it is the edge of a big tree. Where many of the finds
+          // stand up (30 %), the walk is trusted (small young trees the DSM
+          // cannot see count too); elsewhere only the finds that stand up.
+          // (Without a DSM the alley check alone decides.)
+          const heightAt = (pt) => {
+            if (!chm) return NaN;
+            const c0 = Math.floor(pt[0] / pixel), r0 = h - 1 - Math.floor(pt[1] / pixel), rr2 = Math.max(1, Math.round(0.5 / pixel));
+            let mx = -Infinity;
+            for (let y = Math.max(0, r0 - rr2); y <= Math.min(h - 1, r0 + rr2); y++) for (let x = Math.max(0, c0 - rr2); x <= Math.min(w - 1, c0 + rr2); x++) {
+              const v = chm[y * w + x];
+              if (Number.isFinite(v) && v > mx) mx = v;
+            }
+            return mx;
+          };
+          for (const c of candsL) c.height = heightAt(c.pk.spot);
+          const measured = candsL.filter((c) => Number.isFinite(c.height));
+          const standing = measured.filter((c) => c.height >= 0.4 && c.height <= 4).length;
+          leafWalk.standing_up = standing;
+          // (on a coarse analysis grid, over 20 cm, such small plants cannot
+          // be judged by their colour: there only the finds that stand up)
+          leafWalk.trusted = pixel <= 0.2 && (!measured.length || standing >= 0.3 * measured.length);
+          for (const { pk, nearOwn, height } of leafWalk.counted ? candsL : []) {
+            if (Number.isFinite(height) && (height > 4 || (!leafWalk.trusted && height < 0.4))) continue;
+            if (pk.list.some((u2) => labels[u2])) continue;
+            const pu = Uf(pk.spot);
+            let ps = null;
+            const o = nearOwn(pu, 1)[0];
+            if (o && o.pos) {
+              const ex = pk.spot[0] - o.pt[0], ey = pk.spot[1] - o.pt[1];
+              const uu = o.pos[0] + I[0][0] * ex + I[0][1] * ey, vv = o.pos[1] + I[1][0] * ex + I[1][1] * ey;
+              const pp = Math.round(uu), qq = Math.round(vv);
+              if (Math.abs(uu - pp) <= 0.35 && Math.abs(vv - qq) <= 0.3 && !occ.has(pp + "," + qq)) ps = [pp, qq];
+            }
+            if (ps) occ.add(siteOf(ps));
+            const id = count + extra.length + 1;
+            for (const u2 of pk.list) { labels[u2] = id; mask[u2] = 1; }
+            extra.push({ pos: ps, spot: pk.spot, size: pk.list.length, young: true });
+            leafWalk.added++;
+          }
+        }
+      }
+
+      // The whole young tree, not only its core: each young crown's outline
+      // grows over the leaves joined to it (pixels the pecan classifier
+      // calls canopy, or clearly greener than the soil around), up to 0.5 m
+      // out. Where that would spread into grass (much more than the crown
+      // itself), only the classifier's leaves are added.
+      if (opts.youngOutline !== false && extra.length) {
+        const own = new Map();
+        for (let i = 0; i < n; i++) {
+          const l = labels[i];
+          if (l > count && extra[l - count - 1] && extra[l - count - 1].young) {
+            if (!own.has(l)) own.set(l, []);
+            own.get(l).push(i);
+          }
+        }
+        const reachG = Math.max(1, Math.round(0.5 / pixel)), r1 = Math.round(1.0 / pixel), r2 = Math.round(2.0 / pixel);
+        const isFree = (k) => valid[k] && !labels[k] && !trimmedAway[k];
+        for (const [l, pix] of own) {
+          let cx = 0, cy = 0;
+          for (const u of pix) { cx += u % w; cy += (u / w) | 0; }
+          cx = Math.round(cx / pix.length); cy = Math.round(cy / pix.length);
+          const soil = [];
+          for (let y = Math.max(0, cy - r2); y <= Math.min(h - 1, cy + r2); y += 2) for (let x = Math.max(0, cx - r2); x <= Math.min(w - 1, cx + r2); x += 2) {
+            const d = Math.hypot(x - cx, y - cy), k = y * w + x;
+            if (d >= r1 && d <= r2 && isFree(k) && !(small && small[k])) soil.push(exgAt(k));
+          }
+          if (soil.length < 10) continue;
+          const thr = percentile(soil, 50) + 0.05;
+          const growBy = (leafOnly) => {
+            const dist = new Map(pix.map((u) => [u, 0])), q = pix.slice(), added = [];
+            let atEdge = 0;
+            for (let qi = 0; qi < q.length; qi++) {
+              const u = q[qi], ux = u % w, uy = (u / w) | 0, du = dist.get(u);
+              if (du >= reachG) continue;
+              for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                const vx = ux + dx, vy = uy + dy, v = vy * w + vx;
+                if (vx < 0 || vy < 0 || vx >= w || vy >= h || dist.has(v) || !isFree(v)) continue;
+                const leaf = small && small[v];
+                if (!leaf && (leafOnly || exgAt(v) < thr)) continue;
+                dist.set(v, du + 1); q.push(v); added.push(v);
+                if (du + 1 >= reachG) atEdge++;
+              }
+            }
+            return { added, atEdge };
+          };
+          let g = growBy(false);
+          if (g.added.length > Math.max(0.6 / area, 1.5 * pix.length) || g.atEdge > 0.3 * Math.max(1, g.added.length)) g = growBy(true);
+          if (g.added.length > Math.max(0.6 / area, 1.5 * pix.length)) continue;
+          for (const v of g.added) { labels[v] = l; mask[v] = 1; }
+          extra[l - count - 1].size += g.added.length;
         }
       }
     }
@@ -3604,6 +3815,7 @@
         young_dark_search: darkSearch,
         young_dark_walk: darkWalk,
         young_half_shade_walk: midWalk,
+        young_leaf_walk: leafWalk,
         young_full_resolution: fineSearch && {
           positions_searched: fineSearch.on, found_on_positions: fineSearch.onFound,
           between_searched: fineSearch.between, found_between: fineSearch.betweenFound, offset_row_trees: fineSearch.runs,
