@@ -1393,6 +1393,15 @@
   // ------------------------------------------------------------------ main
   async function analyze(input, opts = {}, progress = () => {}) {
     const step = async (text) => { progress(text); await new Promise((r) => setTimeout(r, 0)); };
+    // progress inside a long step (at most about once a second): the page
+    // stays responsive and shows how far the step is
+    let lastTick = 0;
+    const tick = async (text, i, n) => {
+      const now = Date.now();
+      if (now - lastTick < 800) return;
+      lastTick = now;
+      await step(`${text} … ${Math.min(99, Math.round((100 * i) / Math.max(1, n)))} %`);
+    };
     const { rgba, width: w, height: h, pixel } = input;
     const n = w * h, area = pixel * pixel;
     const design = opts.designFt === undefined ? [20, 40] : opts.designFt;
@@ -2523,7 +2532,16 @@
         const found2 = [], picks2 = new Map(), found3 = [], picks3 = new Map();
         const check2 = { on: 0, onFound: 0, between: 0, betweenFound: 0 };
         const check3 = { on: 0, onFound: 0, between: 0, betweenFound: 0 };
+        // The positions in between (where nothing was planted) only serve as
+        // the weed check: a sample of whole rows (about 1200 places) is enough,
+        // and it saves most of the reading of the full-resolution image.
+        let betweenAll = 0;
+        for (const [, [lo, hi]] of searchRows) betweenAll += hi - lo + 2;
+        const betweenStride = Math.max(1, Math.ceil(betweenAll / (opts.fineBetweenMax ?? 1200)));
+        let rowNo = 0;
         for (const [q, [lo, hi]] of searchRows) {
+          const sampleRow = rowNo % betweenStride === 0;
+          await tick("Young trees: full-resolution look at the empty planting positions", rowNo++, searchRows.size);
           for (let p = lo - 1; p <= hi + 1; p++) {
             if (done.has(p + "," + q)) continue;
             const s = spotAt(p, q);
@@ -2535,7 +2553,7 @@
             if (r.pick) found2.push({ pos: [p, q], pick: r.pick });
             if (r.pickB) found3.push({ pos: [p, q], pick: r.pickB });
           }
-          for (let p = lo - 1; p <= hi; p++) {
+          for (let p = lo - 1; p <= hi && sampleRow; p++) {
             if (betweenPicks.has(p + "," + q)) continue;     // green already found there by the search above
             const s = spotAt(p + 0.5, q);
             const r = s && await look(s[0], s[1]);
@@ -2549,7 +2567,7 @@
         const runs2 = [...picks2.values()].filter(inRun2);
         check2.betweenFound = picks2.size - runs2.length;
         const rate2On = check2.onFound / Math.max(1, check2.on), rate2Between = check2.betweenFound / Math.max(1, check2.between);
-        fineSearch = { ...check2, runs: runs2.length, counted: check2.between >= 20 && check2.onFound >= 3 && rate2Between <= 0.25 * rate2On, added: 0 };
+        fineSearch = { ...check2, runs: runs2.length, counted: check2.between >= 20 && check2.onFound >= 3 && rate2Between <= 0.25 * rate2On, added: 0, between_rows_sampled: `1 in ${betweenStride}` };
         // the lone green crowns on clean bare soil: their own check
         const inRun3 = (b3) => picks3.has((b3.p - 1) + "," + b3.q) || picks3.has((b3.p + 1) + "," + b3.q);
         const runs3 = [...picks3.values()].filter(inRun3);
@@ -2642,13 +2660,16 @@
           if (opts.debugYoung && tag) for (const pk of out) opts.debugYoung(tag + (keep ? "_row" : "_alley"), pk.spot, pk.spot, pk.list.length * area, pk.info || true);   // testing only
           return out.length;
         };
+        let walkNo = 0;
         for (const list of rows2.values()) {
+          await tick("Young trees: walking along every row (1 of 4)", walkNo++, rows2.size);
           if (list.length < 2) continue;
           rowWalk.rows++;
           list.sort((p1, p2) => p1.u - p2.u);
           rowWalk.onRows += walk(list, 0, cands);
           // the alley beside the row, where nothing was planted: the check
-          rowWalk.inAlleys += walk(list, 0.5 * rowSp, null);
+          // (the weed check along the alleys: every second alley, counted twice)
+          if (walkNo % 2) rowWalk.inAlleys += 2 * walk(list, 0.5 * rowSp, null);
         }
         rowWalk.counted = rowWalk.onRows >= 3 && rowWalk.inAlleys <= 0.15 * rowWalk.onRows + 1;
         for (const { pk, nearOwn } of rowWalk.counted ? cands : []) {
@@ -2683,11 +2704,13 @@
           }
           const cands3 = [];
           darkWalk = { onRows: 0, inAlleys: 0, counted: false, added: 0 };
+          walkNo = 0;
           for (const list of rows2.values()) {
+            await tick("Young trees: walking along every row (2 of 4)", walkNo++, rows2.size);
             if (list.length < 2) continue;
             list.sort((p1, p2) => p1.u - p2.u);
             darkWalk.onRows += walk(list, 0, cands3, findDark, 0.25);
-            darkWalk.inAlleys += walk(list, 0.5 * rowSp, null, findDark, 0.25);
+            if (walkNo % 2) darkWalk.inAlleys += 2 * walk(list, 0.5 * rowSp, null, findDark, 0.25);
           }
           darkWalk.counted = darkWalk.onRows >= 3 && darkWalk.inAlleys <= 0.15 * darkWalk.onRows + 1;
           for (const { pk, nearOwn } of darkWalk.counted ? cands3 : []) {
@@ -2722,11 +2745,13 @@
           const candsM = [];
           midWalk = { onRows: 0, inAlleys: 0, counted: false, added: 0 };
           const finderM = (x, y) => findSapling(x, y, Lm);
+          walkNo = 0;
           for (const list of rows2.values()) {
+            await tick("Young trees: walking along every row (3 of 4)", walkNo++, rows2.size);
             if (list.length < 2) continue;
             list.sort((p1, p2) => p1.u - p2.u);
             midWalk.onRows += walk(list, 0, candsM, finderM);
-            midWalk.inAlleys += walk(list, 0.5 * rowSp, null, finderM);
+            if (walkNo % 2) midWalk.inAlleys += 2 * walk(list, 0.5 * rowSp, null, finderM);
           }
           midWalk.counted = midWalk.onRows >= 3 && midWalk.inAlleys <= 0.15 * midWalk.onRows + 1;
           for (const { pk, nearOwn } of midWalk.counted ? candsM : []) {
@@ -2853,13 +2878,15 @@
           };
           const candsL = [];
           leafWalk = { onRows: 0, inAlleys: 0, counted: false, added: 0 };
+          walkNo = 0;
           for (const list of rows2.values()) {
+            await tick("Young trees: walking along every row (4 of 4)", walkNo++, rows2.size);
             if (list.length < 2) continue;
             list.sort((p1, p2) => p1.u - p2.u);
             // young trees at 20 ft or closer: down to 0.4 of the spacing apart
             const cfgL = { minGap: 0.4 * inRow, clear: 0.6 };
             leafWalk.onRows += walk(list, 0, candsL, findLeafy, 0.15, "leaf", cfgL);
-            leafWalk.inAlleys += walk(list, 0.5 * rowSp, null, findLeafy, 0.15, "leaf", cfgL);
+            if (walkNo % 2) leafWalk.inAlleys += 2 * walk(list, 0.5 * rowSp, null, findLeafy, 0.15, "leaf", cfgL);
           }
           leafWalk.counted = leafWalk.onRows >= 3 && leafWalk.inAlleys <= 0.15 * leafWalk.onRows + 1;
           // With the DSM: a young pecan stands up (0.4 to 4 m), weeds lie low,
@@ -3686,6 +3713,58 @@
       for (let round = 0; round < (opts.laneSmooth ?? 1); round++) {
         for (const s of samples.values()) s.u = smooth(s.u);
         untangle(true);
+      }
+      // A red line keeps off blue crowns and a blue line off red ones: where
+      // a line runs over a crown of the other colour it bends around it
+      // (to the nearer free side, up to about 0.45 tree spacings), the bend
+      // spread smoothly over at least 3 m on each side (a gentle wave); a
+      // bend is kept only where it takes the line off the other colour, and
+      // the lines never cross (they give way to each other last).
+      if (opts.laneAvoid !== false) {
+        const otherL = (number, u, v) => {
+          const [x, y] = toXY(u, v);
+          const c = Math.floor(x / pixel), r = h - 1 - Math.floor(y / pixel);
+          if (c < 0 || r < 0 || c >= w || r >= h) return false;
+          return depthIn[1 - (Math.abs(number) % 2)][r * w + c] * pixel > edgeTol;
+        };
+        const reachA = (opts.laneAvoidReach ?? 0.45) * inRow;
+        for (const s of samples.values()) s.w = new Float64Array(s.u.length).fill(1);
+        for (let round = 0; round < 4; round++) {
+          let anyMoved = false;
+          for (const [number, s] of samples) {
+            const shift = new Float64Array(s.u.length);
+            let need = 0;
+            for (let i = 0; i < s.u.length; i++) {
+              const v = (s.k0 + i) * STEP, u = s.u[i];
+              if (!otherL(number, u, v)) continue;
+              need++;
+              for (let d = pixel / 2; d <= reachA; d += pixel / 2) {
+                const freeL = !otherL(number, u - d, v), freeR = !otherL(number, u + d, v);
+                if (!freeL && !freeR) continue;
+                const sg2 = freeL ? -1 : 1;
+                shift[i] = sg2 * (d + (!otherL(number, u + sg2 * (d + 0.3), v) ? 0.3 : 0));
+                break;
+              }
+            }
+            if (!need) continue;
+            const total2 = new Float64Array(s.u.length);
+            for (let i = 0; i < s.u.length; i++) {
+              if (!shift[i]) continue;
+              const spreadK = Math.round(Math.max(3, 3 * Math.abs(shift[i])) / STEP);
+              for (let j = Math.max(0, i - spreadK); j <= Math.min(s.u.length - 1, i + spreadK); j++) {
+                const t2 = Math.abs(j - i) / (spreadK + 1), f = shift[i] * (1 - t2 * t2 * (3 - 2 * t2));
+                if (Math.abs(f) > Math.abs(total2[j])) total2[j] = f;
+              }
+            }
+            const onOther = (arr) => { let o = 0; for (let i = 0; i < arr.length; i++) if (otherL(number, arr[i], (s.k0 + i) * STEP)) o++; return o; };
+            const tried = s.u.map((u, i) => u + total2[i]);
+            if (onOther(tried) >= onOther(s.u)) continue;
+            anyMoved = true;
+            for (let i = 0; i < s.u.length; i++) { s.u[i] = tried[i]; if (shift[i]) s.w[i] = 20; }
+          }
+          untangle(true);
+          if (!anyMoved) break;
+        }
       }
     } else {
     // the shifts are smoothed along each line (gentle bends, no notches),
