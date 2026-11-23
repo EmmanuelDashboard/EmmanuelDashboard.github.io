@@ -2566,13 +2566,16 @@
         const inRun2 = (b2) => picks2.has((b2.p - 1) + "," + b2.q) || picks2.has((b2.p + 1) + "," + b2.q);
         const runs2 = [...picks2.values()].filter(inRun2);
         check2.betweenFound = picks2.size - runs2.length;
-        const rate2On = check2.onFound / Math.max(1, check2.on), rate2Between = check2.betweenFound / Math.max(1, check2.between);
+        // (from a sample of the in-between places the weed rate is uncertain:
+        // counted one weed more, so a lucky sample never lets weeds in)
+        const extraWeed = betweenStride > 1 ? 1 : 0;
+        const rate2On = check2.onFound / Math.max(1, check2.on), rate2Between = (check2.betweenFound + extraWeed) / Math.max(1, check2.between);
         fineSearch = { ...check2, runs: runs2.length, counted: check2.between >= 20 && check2.onFound >= 3 && rate2Between <= 0.25 * rate2On, added: 0, between_rows_sampled: `1 in ${betweenStride}` };
         // the lone green crowns on clean bare soil: their own check
         const inRun3 = (b3) => picks3.has((b3.p - 1) + "," + b3.q) || picks3.has((b3.p + 1) + "," + b3.q);
         const runs3 = [...picks3.values()].filter(inRun3);
         check3.betweenFound = picks3.size - runs3.length;
-        const rate3On = check3.onFound / Math.max(1, check3.on), rate3Between = check3.betweenFound / Math.max(1, check3.between);
+        const rate3On = check3.onFound / Math.max(1, check3.on), rate3Between = (check3.betweenFound + extraWeed) / Math.max(1, check3.between);
         fineSearch.bare_soil = { found_on_positions: check3.onFound, found_between: check3.betweenFound, counted: check3.between >= 20 && check3.onFound >= 3 && rate3Between <= 0.25 * rate3On, added: 0 };
         {
           const commit2 = (pos2, pick) => {
