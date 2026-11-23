@@ -1621,6 +1621,7 @@
     const site = new Map();
     for (let t = 0; t < count; t++) if (pos[t] && alive[t]) site.set(siteOf(pos[t]), t);
     const extra = [];
+    let overhangKept = 0;
     const radius = Math.ceil(inRow / pixel);
     const minArea = 0.2 * percentile(Array.from({ length: count }, (_, t) => sizes[t + 1]).filter((s, t) => alive[t] && eligible[t]), 50);
     for (const t of [...site.values()]) {
@@ -1659,6 +1660,46 @@
             for (const v of [ux > 0 ? u - 1 : -1, ux < w - 1 ? u + 1 : -1, u - w, u + w]) if (v >= 0 && set.has(v) && !seen.has(v)) { seen.add(v); stack.push(v); }
           }
           if (seen.size < minArea) continue;
+          // With the DSM: only a tree of its own. Its canopy rises to its own
+          // top, with a dip between it and the neighbour's top; canopy that
+          // keeps rising into the neighbour is the neighbour's branches
+          // spreading over the empty place (no trunk there): it stays with
+          // the neighbour and is not counted as a tree.
+          // (off by default: in closed canopy the elevation model cannot tell
+          // touching trees of one height apart from spreading branches, and
+          // real trees would be lost)
+          if (chm && score && opts.inferredNeedsTop === true) {
+            let hp = -1;
+            for (const u of seen) if (hp < 0 || score[u] > score[hp]) hp = u;
+            const hx = hp % w, hy = (hp / w) | 0, hTop = score[hp];
+            let ownTop = hTop > peakMin;
+            for (const o of [t, right]) {
+              let cnt = 0;
+              for (const u of seen) if (labels[u] === o + 1) cnt++;
+              if (cnt < 0.2 * seen.size) continue;
+              const ox = pts[o][0] / pixel - 0.5, oy = h - pts[o][1] / pixel - 0.5;
+              const steps = Math.max(1, Math.ceil(Math.hypot(ox - hx, oy - hy)));
+              let lo = Infinity;
+              for (let s = 0; s <= steps; s++) {
+                const x = Math.round(hx + ((ox - hx) * s) / steps), y = Math.round(hy + ((oy - hy) * s) / steps);
+                if (x >= 0 && y >= 0 && x < w && y < h) lo = Math.min(lo, score[y * w + x]);
+              }
+              if (hTop - lo >= Math.max(0.5, 0.1 * hTop)) continue;          // a dip: its own top
+              // no clear dip (touching trees of one height often have none):
+              // still its own tree when its highest point lies inside it,
+              // away from the neighbour; only canopy whose highest point is
+              // where it meets the neighbour (it rises into the neighbour) is
+              // the neighbour's branches
+              const rr = Math.ceil(1.0 / pixel);
+              let near = false;
+              for (let y = Math.max(0, hy - rr); y <= Math.min(h - 1, hy + rr) && !near; y++) for (let x = Math.max(0, hx - rr); x <= Math.min(w - 1, hx + rr); x++) {
+                const k2 = y * w + x;
+                if (labels[k2] === o + 1 && !seen.has(k2) && (x - hx) ** 2 + (y - hy) ** 2 <= rr * rr) { near = true; break; }
+              }
+              if (near) ownTop = false;
+            }
+            if (!ownTop) { overhangKept++; continue; }
+          }
           const id = count + extra.length + 1;
           for (const u of seen) labels[u] = id;
           // A neighbour must stay in one piece: canopy of it cut off on the
@@ -1709,7 +1750,7 @@
     // height rules dropped, standing on an EMPTY planting position of a row,
     // is a young tree. It becomes a crown (flag YOUNG_TREE), so it is counted
     // and takes its place in the EVEN / ODD alternation.
-    let gridSearch = null, fineSearch = null, rowWalk = null, darkSearch = null, darkWalk = null, midWalk = null, leafWalk = null;
+    let gridSearch = null, fineSearch = null, rowWalk = null, darkSearch = null, darkWalk = null, midWalk = null, leafWalk = null, youngStrip = null;
     if (small) {
       await step("Young trees on empty planting positions …");
       const I = inv2(a, b);
@@ -2289,7 +2330,7 @@
             if (f.pick.list.some((u) => labels[u]) || occ2.has(siteOf(f.pos))) continue;
             const id = count + extra.length + 1;
             for (const u of f.pick.list) { labels[u] = id; mask[u] = 1; }
-            extra.push({ pos: f.pos, spot: f.pick.spot, size: f.pick.list.length, young: true });
+            extra.push({ pos: f.pos, spot: f.pick.spot, size: f.pick.list.length, young: true, dark: true });
             occ2.add(siteOf(f.pos));
             darkSearch.added++;
           }
@@ -2663,7 +2704,7 @@
             if (ps) occ.add(siteOf(ps));
             const id = count + extra.length + 1;
             for (const u2 of pk.list) { labels[u2] = id; mask[u2] = 1; }
-            extra.push({ pos: ps, spot: pk.spot, size: pk.list.length, young: true });
+            extra.push({ pos: ps, spot: pk.spot, size: pk.list.length, young: true, dark: true });
             darkWalk.added++;
           }
         }
@@ -2915,6 +2956,57 @@
           extra[l - count - 1].size += g.added.length;
         }
       }
+
+      // Young trees stand on the planted strip. Where they do so in this
+      // field (most young crowns have bare soil around them), a "young
+      // crown" with grass all around (under 40 % bare soil within 1 m) is
+      // a tuft of grass at the strip edge: not counted.
+      if (opts.youngOnStrip !== false && extra.some((e) => e.young)) {
+        const ownPix = new Map();
+        for (let i = 0; i < n; i++) {
+          const l = labels[i];
+          if (l > count && extra[l - count - 1] && extra[l - count - 1].young) {
+            if (!ownPix.has(l)) ownPix.set(l, []);
+            ownPix.get(l).push(i);
+          }
+        }
+        const rIn2 = Math.max(1, Math.round(0.3 / pixel)), rOut2 = Math.max(rIn2 + 1, Math.round(1.0 / pixel));
+        const bareOf = new Map();
+        for (const [l, pix] of ownPix) {
+          const dist = new Map(pix.map((u) => [u, 0])), q = pix.slice();
+          let ring = 0, bare = 0;
+          for (let qi = 0; qi < q.length; qi++) {
+            const u = q[qi], du = dist.get(u), ux = u % w, uy = (u / w) | 0;
+            if (du >= rOut2) continue;
+            for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+              const vx = ux + dx, vy = uy + dy, v = vy * w + vx;
+              if (vx < 0 || vy < 0 || vx >= w || vy >= h || dist.has(v)) continue;
+              dist.set(v, du + 1); q.push(v);
+              if (du + 1 > rIn2 && valid[v] && !labels[v]) { ring++; if (exgAt(v) < 0.06) bare++; }
+            }
+          }
+          if (ring) bareOf.set(l, bare / ring);
+        }
+        const fr = [...bareOf.values()];
+        youngStrip = { median_bare_soil_around: fr.length ? percentile(fr, 50) : null, applied: false, removed: 0 };
+        // (not for young trees found as dark bushes in weeds, nor for those the
+        // elevation model shows standing 0.4 to 4 m tall: grass lies flat)
+        const standsUp = (pix) => {
+          if (!chm) return false;
+          let mx = -Infinity;
+          for (const u of pix) { const v = chm[u]; if (Number.isFinite(v) && v > mx) mx = v; }
+          return mx >= 0.4 && mx <= 4;
+        };
+        if (fr.length >= 10 && percentile(fr, 50) >= 0.6) {
+          youngStrip.applied = true;
+          for (const [l, f] of bareOf) {
+            if (f >= 0.4 || extra[l - count - 1].dark || standsUp(ownPix.get(l))) continue;
+            for (const u of ownPix.get(l)) { labels[u] = 0; mask[u] = 0; }
+            extra[l - count - 1].drop = true;
+            youngStrip.removed++;
+          }
+        }
+      }
     }
     const total = count + extra.length;
     extra.forEach((e, k) => {
@@ -2923,7 +3015,7 @@
     });
     const aliveAll = new Uint8Array(total);
     for (let t = 0; t < count; t++) aliveAll[t] = alive[t];
-    for (let t = count; t < total; t++) aliveAll[t] = 1;
+    for (let t = count; t < total; t++) aliveAll[t] = extra[t - count].drop ? 0 : 1;
     const inferred = new Uint8Array(total), young = new Uint8Array(total);
     for (let t = count; t < total; t++) { if (extra[t - count].young) young[t] = 1; else inferred[t] = 1; }
 
@@ -3067,7 +3159,19 @@
         const missing = Math.round((g.v - prev.v) / rowSpacing) - 1;
         for (let q = 1; q <= missing; q++) {
           const f = q / (missing + 1);
-          const v = prev.v + f * (g.v - prev.v), u = prev.u + f * (g.u - prev.u);
+          const v = prev.v + f * (g.v - prev.v);
+          let u = prev.u + f * (g.u - prev.u);
+          // A row without a tree of this line: it crosses that row halfway
+          // between the lines beside it (where they go through their trees),
+          // so it is not squeezed against a neighbour.
+          if (opts.spreadFree !== false) {
+            const lo = treeU(number - 1, v), hi = treeU(number + 1, v);
+            if (lo !== null && hi !== null) u = (lo + hi) / 2;
+            else if (lo !== null || hi !== null) {
+              const nb = lo !== null ? lo : hi;
+              if (Math.abs(u - nb) < 0.5 * inRow) u = nb + (u >= nb ? 1 : -1) * 0.5 * inRow;
+            }
+          }
           ks.push({ u: crossing(u, v), v });
         }
         ks.push(g);
@@ -3343,11 +3447,152 @@
     }
     const ext = new Map();
     for (const list of byDiag.values()) for (const t of list) ext.set(t, extent(t));
+    // where a line goes through its tree in the row at v (null: no tree there)
+    const treeU = (num, v) => {
+      const list = byDiag.get(num);
+      if (!list) return null;
+      let best = null, bd = 0.35 * rowSpacing;
+      for (const t of list) { const d = Math.abs(V(mids[t]) - v); if (d < bd) { bd = d; best = t; } }
+      return best === null ? null : U(mids[best]);
+    };
 
     // One unbroken line per diagonal, from its first to its last crown, also
     // across white areas (no image) inside the field.
     const uvLines = new Map();
-    for (const [number, members] of [...byDiag.entries()].sort((p, q) => p[0] - q[0])) {
+    const lanes = (opts.lineMode || "lanes") === "lanes";
+    if (lanes) {
+      // Lines as lanes: in every planted row each line goes through the
+      // middle of its own tree; in a row where it has no tree it crosses the
+      // row between the lines beside it (in the order of the lines, never
+      // squeezed against one); from row to row it runs as one smooth curve.
+      // So the lines never cross, never bunch, and every tree is on its line.
+      const rowsV = new Map();
+      for (const list of byDiag.values()) for (const t of list) if (pos[t]) {
+        const r = pos[t][1];
+        if (!rowsV.has(r)) rowsV.set(r, []);
+        rowsV.get(r).push(V(mids[t]));
+      }
+      const vRow = new Map([...rowsV].map(([r, vs]) => [r, percentile(vs, 50)]));
+      const rowKeys = [...vRow.keys()].sort((p, q) => p - q);
+      const rowOf = (t) => {
+        if (pos[t]) return pos[t][1];
+        const v = V(mids[t]);
+        let best = null, bd = Infinity;
+        for (const r of rowKeys) { const d = Math.abs(vRow.get(r) - v); if (d < bd) { bd = d; best = r; } }
+        return best;
+      };
+      const nums = [...byDiag.keys()].sort((p, q) => p - q);
+      const K = new Map();
+      for (const num of nums) {
+        const m = new Map();
+        for (const t of byDiag.get(num)) {
+          const r = rowOf(t);
+          if (r === null) continue;
+          const u = U(mids[t]), v = V(mids[t]), wt = Math.max(1, area2[t + 1]);
+          const e = ext.get(t), small = e ? e[1] - e[0] < 2.5 : false;
+          const k = m.get(r);
+          if (!k || wt > k.w) m.set(r, { u, v, w: wt, crown: true, small });
+        }
+        K.set(num, m);
+      }
+      // which way the numbers run along a row
+      let sumS = 0;
+      for (const r of rowKeys) {
+        let prev = null;
+        for (const num of nums) { const k = K.get(num).get(r); if (!k) continue; if (prev) sumS += Math.sign(k.u - prev[1]) / (num - prev[0]); prev = [num, k.u]; }
+      }
+      const sg = sumS < 0 ? -1 : 1, perStep = inRow;
+      // knots in rows without a tree of the line
+      const filled = new Map(nums.map((num) => [num, new Map(K.get(num))]));
+      for (const num of nums) {
+        const own = K.get(num), rs = [...own.keys()].sort((p, q) => p - q);
+        if (!rs.length) continue;
+        for (const r of rowKeys) {
+          if (r <= rs[0] || r >= rs[rs.length - 1] || own.has(r)) continue;
+          let lo = null, hi = null;
+          for (let d = 1; d <= 4 && (!lo || !hi); d++) {
+            if (!lo && K.has(num - d) && K.get(num - d).has(r)) lo = [d, K.get(num - d).get(r)];
+            if (!hi && K.has(num + d) && K.get(num + d).has(r)) hi = [d, K.get(num + d).get(r)];
+          }
+          let pr = null, nx = null;
+          for (const r2 of rs) { if (r2 < r) pr = own.get(r2); else if (r2 > r && !nx) nx = own.get(r2); }
+          const vv = lo && hi ? (lo[1].v + hi[1].v) / 2 : lo ? lo[1].v : hi ? hi[1].v : vRow.get(r);
+          const uOwn = pr.u + ((nx.u - pr.u) * (vv - pr.v)) / (nx.v - pr.v || 1);
+          let u;
+          if (lo && hi) u = lo[1].u + ((hi[1].u - lo[1].u) * lo[0]) / (lo[0] + hi[0]);
+          else if (lo) u = 0.5 * (lo[1].u + sg * perStep * lo[0]) + 0.5 * uOwn;
+          else if (hi) u = 0.5 * (hi[1].u - sg * perStep * hi[0]) + 0.5 * uOwn;
+          else u = uOwn;
+          // where it crosses the row: at a gap between the trees, never
+          // through a tree of the other colour if there is any way past
+          // (between the lines beside it)
+          const fam = Math.abs(num) % 2, half = 0.45 * rowSpacing;
+          const uA = lo ? lo[1].u + sg * 0.3 * perStep : u - 0.6 * perStep, uB = hi ? hi[1].u - sg * 0.3 * perStep : u + 0.6 * perStep;
+          const ua = Math.min(uA, uB), ub = Math.max(uA, uB);
+          let bestU = u, bestC = Infinity;
+          for (let uu = ua; uu <= ub + 1e-9; uu += 0.2) {
+            let c = 0;
+            for (let s = -half; s <= half; s += pixel) {
+              const [x, y] = toXY(uu, vv + s), l = labelAt(x, y);
+              if (l > 0 && diagOfLabel[l] !== 0) c += Math.abs(diagOfLabel[l]) % 2 === fam ? 0.3 : 1;
+            }
+            c = c * pixel + 0.15 * Math.abs(uu - u);
+            if (c < bestC) { bestC = c; bestU = uu; }
+          }
+          u = bestU;
+          filled.get(num).set(r, { u, v: vv, w: 1, crown: false });
+        }
+      }
+      // in every row the lines keep their order, at least 0.35 tree spacings
+      // apart (trees hold their place, the free crossings give way)
+      const gapL = 0.35 * perStep;
+      for (const r of rowKeys) {
+        const at = [];
+        for (const num of nums) { const k = filled.get(num).get(r); if (k) at.push([num, k]); }
+        if (at.length < 2) continue;
+        const blocks = [];
+        for (const [num, k] of at) {
+          const wi = k.crown ? 100 : 1;
+          blocks.push({ sum: wi * (sg * k.u - gapL * num), w: wi, n: 1 });
+          while (blocks.length > 1 && blocks[blocks.length - 2].sum / blocks[blocks.length - 2].w > blocks[blocks.length - 1].sum / blocks[blocks.length - 1].w) {
+            const top = blocks.pop(), below = blocks[blocks.length - 1];
+            below.sum += top.sum; below.w += top.w; below.n += top.n;
+          }
+        }
+        let idx = 0;
+        for (const bl of blocks) { const y = bl.sum / bl.w; for (let q = 0; q < bl.n; q++, idx++) at[idx][1].u = sg * (y + gapL * at[idx][0]); }
+      }
+      // From a tree to the next one: a smooth curve, a little steeper
+      // through the trees and flatter across the grass between the rows.
+      const lam = opts.laneBend ?? 0.5, plateau = opts.lanePlateau ?? 0;
+      const S = (t) => {
+        const tp = Math.max(0, Math.min(1, (t - plateau) / (1 - 2 * plateau)));
+        return (1 - lam) * t + lam * tp * tp * (3 - 2 * tp);
+      };
+      const edgeAlong = (u0, v0, dir) => {
+        let d = 0;
+        for (let s = 0.5; s < 2000; s += 0.5) { const [x, y] = toXY(u0 + dir * slope * s, v0 + dir * s); if (!validAt(x, y)) break; d = s; }
+        return d + 0.5;
+      };
+      for (const num of nums) {
+        const ks = [...filled.get(num).values()].sort((p, q) => p.v - q.v);
+        if (!ks.length) continue;
+        for (let q = 1; q < ks.length; q++) ks[q].v = Math.max(ks[q].v, ks[q - 1].v + 0.5);
+        const line = [], f = ks[0], l = ks[ks.length - 1];
+        const lenB = Math.max(1.5, edgeAlong(f.u, f.v, -1)), lenE = Math.max(1.5, edgeAlong(l.u, l.v, 1));
+        const nb = Math.max(3, Math.ceil(lenB / 0.25));
+        for (let s = 0; s < nb; s++) { const d = lenB * (1 - s / nb); line.push([f.u - slope * d, f.v - d]); }
+        line.push([f.u, f.v]);
+        for (let q = 0; q + 1 < ks.length; q++) {
+          const a0 = ks[q], a1 = ks[q + 1], steps = Math.max(3, Math.ceil((a1.v - a0.v) / 0.25));
+          for (let s = 1; s <= steps; s++) { const t = s / steps; line.push([a0.u + (a1.u - a0.u) * S(t), a0.v + (a1.v - a0.v) * t]); }
+        }
+        const ne = Math.max(3, Math.ceil(lenE / 0.25));
+        for (let s = 1; s <= ne; s++) { const d = (lenE * s) / ne; line.push([l.u + slope * d, l.v + d]); }
+        line.knots = ks.filter((k) => k.crown).map((k) => [k.u, k.v, k.small]);
+        uvLines.set(num, line);
+      }
+    } else for (const [number, members] of [...byDiag.entries()].sort((p, q) => p[0] - q[0])) {
       const crossing = crossingFor(number);
       let separate = new Set();
       let uv = [];
@@ -3436,6 +3681,13 @@
     };
     for (const s of samples.values()) { s.w = smooth(s.wt); s.u0 = Float64Array.from(s.u); }
     untangle(true);
+    if (lanes) {
+      // lanes are in order already; a light smoothing, order kept
+      for (let round = 0; round < (opts.laneSmooth ?? 1); round++) {
+        for (const s of samples.values()) s.u = smooth(s.u);
+        untangle(true);
+      }
+    } else {
     // the shifts are smoothed along each line (gentle bends, no notches),
     // then a last pass guarantees the order again
     for (const s of samples.values()) {
@@ -3572,6 +3824,7 @@
         if (after <= 1.15 * before + 0.01 * s.u.length) for (let i = 0; i < s.u.length; i++) s.u[i] = sm[i];
       }
       untangle(false);
+    }
     }
     // Last of all: every line runs through the middle of each of its own
     // crowns. Where the steps above moved it off, it is pulled back (the
@@ -3816,6 +4069,8 @@
         young_dark_walk: darkWalk,
         young_half_shade_walk: midWalk,
         young_leaf_walk: leafWalk,
+        overhang_not_split: overhangKept,
+        young_on_strip_check: youngStrip,
         young_full_resolution: fineSearch && {
           positions_searched: fineSearch.on, found_on_positions: fineSearch.onFound,
           between_searched: fineSearch.between, found_between: fineSearch.betweenFound, offset_row_trees: fineSearch.runs,
